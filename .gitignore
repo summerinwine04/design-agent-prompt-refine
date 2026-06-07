@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[codz]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Local data
+data/metadata.db
+runs/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store

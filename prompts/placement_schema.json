@@ -1,0 +1,943 @@
+{
+  "schema_version": "1.0",
+  "schema_name": "童装牛仔类目 Placement Schema",
+  "description": "按品类 x 档位枚举可用 placement 位置，供 Step 2 改款设计 agent 消费",
+  "last_updated": "2026-05-19",
+  "applies_to": "Step 2 改款设计的锚点选择（每个色号方案）",
+  "tier_size_limits": {
+    "A": {
+      "name_zh": "超大主图",
+      "name_en": "super statement print",
+      "max_edge_cm": 20,
+      "max_area_sq_cm": 400,
+      "max_face_coverage_pct": 50,
+      "scarcity": "单款多色中最多 1 个色号方案可使用，9 色场景 A ≤ 1",
+      "use_cases": [
+        "纪念款",
+        "节庆款",
+        "IP 联名款",
+        "非日常款"
+      ],
+      "default": false,
+      "note": "若使用 A 档，必须填写 A档使用理由"
+    },
+    "B": {
+      "name_zh": "主图",
+      "name_en": "statement print",
+      "max_edge_cm": 12,
+      "max_area_sq_cm": 100,
+      "max_face_coverage_pct": 30,
+      "scarcity": "日常款默认主图档位",
+      "use_cases": [
+        "徽章",
+        "适中主图案",
+        "Logo 标识"
+      ],
+      "default": true
+    },
+    "C": {
+      "name_zh": "副图",
+      "name_en": "accent print",
+      "max_edge_cm": 7,
+      "max_area_sq_cm": 100,
+      "max_face_coverage_pct": null,
+      "use_cases": [
+        "小图案",
+        "口袋印花",
+        "辅助元素"
+      ],
+      "default": true,
+      "note": "数学上 7cm 最长边对应面积上限 49 sq cm，schema 给出宽松值 100 sq cm 作为参考极限"
+    },
+    "D": {
+      "name_zh": "装饰",
+      "name_en": "trim / pattern band",
+      "max_edge_cm": null,
+      "max_unit_height_cm": 3,
+      "max_area_sq_cm": null,
+      "max_face_coverage_pct": null,
+      "use_cases": [
+        "装饰带",
+        "连续 pattern",
+        "小 logo 重复",
+        "边缘点缀"
+      ],
+      "default": true,
+      "note": "单元高度 ≤ 3cm，可沿边缘重复排列"
+    }
+  },
+  "exclusion_rules": [
+    "A 档与 B 档互斥：同方案禁止同时使用 A 和 B（视觉重量过载）",
+    "禁止单方案同时使用 2 个 A、2 个 B",
+    "禁止任何锚点跨越版型分割线（口袋边、缝线、拉链、纽扣）",
+    "禁止任何锚点覆盖五金（铆钉、纽扣、拉链头、皮标）",
+    "C 档建议数量 0~3 个，D 档建议数量 0~2 个，但 D 档可沿同一条边缘重复排列"
+  ],
+  "categories": {
+    "denim_jacket": {
+      "name_zh": "牛仔夹克",
+      "name_en": "denim jacket",
+      "typical_age_range": "3-10 岁童装",
+      "key_features": [
+        "翻领或立领",
+        "门襟纽扣或拉链",
+        "前胸双口袋",
+        "肩育克",
+        "袖口纽扣",
+        "下摆收边或调节扣"
+      ],
+      "face_semantics": {
+        "front": {
+          "label_zh": "前身",
+          "label_en": "front",
+          "covers": "衣身正面，含门襟两侧、左右胸口袋区、前下摆"
+        },
+        "back": {
+          "label_zh": "后身",
+          "label_en": "back",
+          "covers": "衣身背面，含育克、后背主面板、后腰、后下摆"
+        },
+        "side": {
+          "label_zh": "侧身",
+          "label_en": "side",
+          "covers": "左右袖（外侧/内侧/袖口）、侧缝、下摆侧角"
+        }
+      },
+      "placements": {
+        "A": [
+          {
+            "id": "jacket_A_back_center",
+            "face": "back",
+            "position_zh": "后背中央偏上整幅式大图",
+            "position_en": "upper back center oversized graphic",
+            "anchor_desc": "覆盖育克下方至后腰上方的主面板",
+            "size_hint": "16-20 cm 宽 x 14-18 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "jacket_A_front_cross",
+            "face": "front",
+            "position_zh": "前胸跨片整幅式大图（避开门襟拉链）",
+            "position_en": "front chest cross-panel oversized graphic (avoid placket zipper)",
+            "anchor_desc": "横跨左右胸顶部，门襟两侧对称延伸",
+            "size_hint": "宽 18-20 cm x 高 12-14 cm",
+            "popularity": "low",
+            "caveat": "受门襟分割影响，构图需对称且能容忍拉链中断"
+          }
+        ],
+        "B": [
+          {
+            "id": "jacket_B_left_chest",
+            "face": "front",
+            "position_zh": "左胸口袋上方主图",
+            "position_en": "left chest above pocket",
+            "anchor_desc": "口袋翻盖上沿至肩缝之间",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jacket_B_right_chest",
+            "face": "front",
+            "position_zh": "右胸口袋上方主图",
+            "position_en": "right chest above pocket",
+            "anchor_desc": "对称位置，常与左胸 B 二选一",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "jacket_B_back_upper_left",
+            "face": "back",
+            "position_zh": "后背左上四分之一区域主图",
+            "position_en": "back upper-left quarter graphic",
+            "anchor_desc": "育克下方左侧，约后背宽度的左 1/3",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jacket_B_back_upper_right",
+            "face": "back",
+            "position_zh": "后背右上四分之一区域主图",
+            "position_en": "back upper-right quarter graphic",
+            "anchor_desc": "育克下方右侧，对称位置",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jacket_B_back_lower_left",
+            "face": "back",
+            "position_zh": "后背左下角主图",
+            "position_en": "back lower-left corner graphic",
+            "anchor_desc": "后腰下方左侧，靠近下摆",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "jacket_B_back_lower_right",
+            "face": "back",
+            "position_zh": "后背右下角主图",
+            "position_en": "back lower-right corner graphic",
+            "anchor_desc": "后腰下方右侧，对称位置",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "C": [
+          {
+            "id": "jacket_C_left_sleeve_mid",
+            "face": "side",
+            "position_zh": "左袖外侧中部副图",
+            "position_en": "left sleeve outer mid",
+            "anchor_desc": "肩缝下 6-10 cm 至肘部之间，居中",
+            "size_hint": "5-7 cm 宽 x 4-6 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jacket_C_right_sleeve_mid",
+            "face": "side",
+            "position_zh": "右袖外侧中部副图",
+            "position_en": "right sleeve outer mid",
+            "anchor_desc": "对称位置",
+            "size_hint": "5-7 cm 宽 x 4-6 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "jacket_C_left_sleeve_shoulder",
+            "face": "side",
+            "position_zh": "左袖外侧近肩部副图",
+            "position_en": "left sleeve outer near shoulder",
+            "anchor_desc": "肩缝下 3-5 cm，常用于 patch 风",
+            "size_hint": "5-7 cm 宽 x 5-7 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jacket_C_back_lower_center",
+            "face": "back",
+            "position_zh": "后腰下方居中副图",
+            "position_en": "back lower center below yoke",
+            "anchor_desc": "后腰下方 3-5 cm，不压腰头",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jacket_C_front_hem_one_side",
+            "face": "front",
+            "position_zh": "前下摆单边副图",
+            "position_en": "front hem one-side",
+            "anchor_desc": "前下摆左侧或右侧靠近门襟一指距离",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "jacket_C_near_chest_pocket",
+            "face": "front",
+            "position_zh": "胸口袋翻盖下方留白处副图",
+            "position_en": "below chest pocket flap blank area",
+            "anchor_desc": "口袋翻盖下沿 1-2 cm，居中或偏外",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "D": [
+          {
+            "id": "jacket_D_placket_band",
+            "face": "front",
+            "position_zh": "门襟装饰带",
+            "position_en": "placket trim band",
+            "anchor_desc": "纽扣两侧 1.5-2 cm 宽装饰条",
+            "size_hint": "单元宽 2-3 cm，沿整个门襟重复",
+            "popularity": "high"
+          },
+          {
+            "id": "jacket_D_collar_band",
+            "face": "front",
+            "position_zh": "领口或领台装饰带",
+            "position_en": "collar stand band",
+            "anchor_desc": "领台外沿一圈",
+            "size_hint": "单元高 2-3 cm，沿领台一周",
+            "popularity": "high"
+          },
+          {
+            "id": "jacket_D_cuff_band",
+            "face": "side",
+            "position_zh": "袖口装饰带",
+            "position_en": "cuff band",
+            "anchor_desc": "袖口边 1.5-2.5 cm",
+            "size_hint": "单元高 2-3 cm，沿袖口一圈",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jacket_D_hem_bottom_edge",
+            "face": "front",
+            "position_zh": "下摆下沿装饰",
+            "position_en": "bottom hem edge band",
+            "anchor_desc": "前后下摆一圈，1-2 cm 宽",
+            "size_hint": "单元高 2-3 cm，沿下摆一周",
+            "popularity": "medium"
+          },
+          {
+            "id": "jacket_D_side_seam_line",
+            "face": "side",
+            "position_zh": "侧缝装饰线",
+            "position_en": "side seam decorative line",
+            "anchor_desc": "腋下至下摆侧缝沿线",
+            "size_hint": "线宽 1-2 cm，沿缝线方向",
+            "popularity": "low"
+          },
+          {
+            "id": "jacket_D_pocket_flap_top",
+            "face": "front",
+            "position_zh": "口袋翻盖上沿装饰",
+            "position_en": "pocket flap top edge",
+            "anchor_desc": "翻盖上沿 1-2 cm",
+            "size_hint": "单元高 ≤ 2 cm，沿翻盖上沿",
+            "popularity": "low"
+          }
+        ]
+      },
+      "禁动区域": [
+        "金属纽扣",
+        "拉链头与拉链布带",
+        "铆钉",
+        "皮标牌",
+        "缝线",
+        "口袋边",
+        "腰头",
+        "肩缝",
+        "袖口扣"
+      ]
+    },
+    "denim_tshirt": {
+      "name_zh": "牛仔T恤",
+      "name_en": "denim T-shirt",
+      "typical_age_range": "3-10 岁童装",
+      "key_features": [
+        "套头无门襟",
+        "短袖",
+        "圆领或 V 领",
+        "可能单边胸口袋",
+        "下摆罗纹或卷边"
+      ],
+      "face_semantics": {
+        "front": {
+          "label_zh": "前身",
+          "label_en": "front",
+          "covers": "前胸整片（无门襟分割），含可能存在的单边胸口袋"
+        },
+        "back": {
+          "label_zh": "后身",
+          "label_en": "back",
+          "covers": "后背整片"
+        },
+        "side": {
+          "label_zh": "侧身",
+          "label_en": "side",
+          "covers": "左右短袖（外侧）、侧缝、下摆侧"
+        }
+      },
+      "placements": {
+        "A": [
+          {
+            "id": "tshirt_A_front_center",
+            "face": "front",
+            "position_zh": "前胸中央整幅式大图",
+            "position_en": "front chest center oversized graphic",
+            "anchor_desc": "锁骨下 4 cm 至腹部之间，居中",
+            "size_hint": "16-20 cm 宽 x 14-18 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "tshirt_A_back_center",
+            "face": "back",
+            "position_zh": "后背中央整幅式大图",
+            "position_en": "back center oversized graphic",
+            "anchor_desc": "颈后下 4 cm 至后腰之间，居中",
+            "size_hint": "16-20 cm 宽 x 14-18 cm 高",
+            "popularity": "very_high"
+          }
+        ],
+        "B": [
+          {
+            "id": "tshirt_B_left_chest",
+            "face": "front",
+            "position_zh": "左胸单图位主图",
+            "position_en": "left chest single graphic",
+            "anchor_desc": "锁骨下 4-6 cm，距前中线 6-8 cm",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "tshirt_B_right_chest",
+            "face": "front",
+            "position_zh": "右胸单图位主图",
+            "position_en": "right chest single graphic",
+            "anchor_desc": "对称位置",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "tshirt_B_front_center_medium",
+            "face": "front",
+            "position_zh": "前胸中央居中主图",
+            "position_en": "front chest center medium graphic",
+            "anchor_desc": "锁骨下 6-8 cm 居中，比 A 档小",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "tshirt_B_back_upper_center",
+            "face": "back",
+            "position_zh": "后背上部居中主图",
+            "position_en": "back upper center graphic",
+            "anchor_desc": "颈后下 5-8 cm，居中",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "tshirt_B_back_lower_left",
+            "face": "back",
+            "position_zh": "后背左下角主图",
+            "position_en": "back lower-left corner graphic",
+            "anchor_desc": "后腰下方左侧",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "tshirt_B_back_lower_right",
+            "face": "back",
+            "position_zh": "后背右下角主图",
+            "position_en": "back lower-right corner graphic",
+            "anchor_desc": "后腰下方右侧",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "C": [
+          {
+            "id": "tshirt_C_left_sleeve_outer",
+            "face": "side",
+            "position_zh": "左短袖外侧副图",
+            "position_en": "left short sleeve outer",
+            "anchor_desc": "肩缝下 2-4 cm，外侧居中",
+            "size_hint": "5-7 cm 宽 x 4-5 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "tshirt_C_right_sleeve_outer",
+            "face": "side",
+            "position_zh": "右短袖外侧副图",
+            "position_en": "right short sleeve outer",
+            "anchor_desc": "对称位置",
+            "size_hint": "5-7 cm 宽 x 4-5 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "tshirt_C_front_hem_one_side",
+            "face": "front",
+            "position_zh": "前下摆单边副图",
+            "position_en": "front hem one-side",
+            "anchor_desc": "下摆边上方 4-6 cm，距侧缝 4-6 cm",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "tshirt_C_back_hem_center",
+            "face": "back",
+            "position_zh": "后下摆居中副图",
+            "position_en": "back hem center",
+            "anchor_desc": "后下摆上方 4-6 cm 居中",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "tshirt_C_back_lower_center",
+            "face": "back",
+            "position_zh": "后腰下方居中副图",
+            "position_en": "back lower center",
+            "anchor_desc": "后腰下方 3-5 cm，居中",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "D": [
+          {
+            "id": "tshirt_D_neckline_band",
+            "face": "front",
+            "position_zh": "领口装饰带",
+            "position_en": "neckline band",
+            "anchor_desc": "领口外沿 1-2 cm 一圈",
+            "size_hint": "单元高 1.5-2.5 cm，沿领口一周",
+            "popularity": "high"
+          },
+          {
+            "id": "tshirt_D_sleeve_hem_band",
+            "face": "side",
+            "position_zh": "短袖袖口装饰带",
+            "position_en": "short sleeve cuff band",
+            "anchor_desc": "短袖边 1-2 cm 一圈",
+            "size_hint": "单元高 1.5-2.5 cm，沿袖口一周",
+            "popularity": "very_high"
+          },
+          {
+            "id": "tshirt_D_hem_bottom_edge",
+            "face": "front",
+            "position_zh": "下摆装饰边",
+            "position_en": "bottom hem edge band",
+            "anchor_desc": "前后下摆 1-2 cm 一圈",
+            "size_hint": "单元高 ≤ 3 cm，沿下摆一周",
+            "popularity": "medium"
+          },
+          {
+            "id": "tshirt_D_side_seam_line",
+            "face": "side",
+            "position_zh": "侧缝装饰线",
+            "position_en": "side seam decorative line",
+            "anchor_desc": "腋下至下摆侧缝",
+            "size_hint": "线宽 1-2 cm，沿缝线",
+            "popularity": "low"
+          }
+        ]
+      },
+      "禁动区域": [
+        "领口罗纹",
+        "袖口罗纹（如有）",
+        "侧缝",
+        "标牌",
+        "下摆罗纹（如有）"
+      ]
+    },
+    "denim_jeans": {
+      "name_zh": "牛仔裤",
+      "name_en": "denim jeans / pants",
+      "typical_age_range": "3-10 岁童装",
+      "key_features": [
+        "前门襟拉链或纽扣",
+        "前 2 后 2 标准 5 口袋",
+        "腰头与皮带环",
+        "内外侧缝",
+        "裤脚翻边或不翻边"
+      ],
+      "face_semantics_note": "裤装的『面』语义与上装不同：前身=前裤片，后身=后裤片含臀部，侧身=外侧腿与裤脚",
+      "face_semantics": {
+        "front": {
+          "label_zh": "前身",
+          "label_en": "front",
+          "covers": "前裤片，含前门襟、前口袋、前大腿、前膝盖"
+        },
+        "back": {
+          "label_zh": "后身",
+          "label_en": "back",
+          "covers": "后裤片，含后臀、后口袋、后大腿、后膝盖"
+        },
+        "side": {
+          "label_zh": "侧身",
+          "label_en": "side",
+          "covers": "外侧腿（从髋部到裤脚）、裤脚、内缝"
+        }
+      },
+      "placements": {
+        "A": [
+          {
+            "id": "jeans_A_single_leg_outer",
+            "face": "side",
+            "position_zh": "单腿外侧整幅式大图（从大腿到膝盖）",
+            "position_en": "single leg outer panoramic graphic from thigh to knee",
+            "anchor_desc": "髋部下 6 cm 至膝盖之间，外侧居中",
+            "size_hint": "12-16 cm 宽 x 18-20 cm 高",
+            "popularity": "medium",
+            "caveat": "建议仅在单腿出现，对称双腿大图会过载"
+          },
+          {
+            "id": "jeans_A_back_seat_large",
+            "face": "back",
+            "position_zh": "后臀部位整幅式大图（避开后口袋）",
+            "position_en": "back seat large graphic (avoid back pockets)",
+            "anchor_desc": "腰头下 2 cm 至后大腿之间，避开两个后口袋",
+            "size_hint": "16-20 cm 宽 x 14-18 cm 高",
+            "popularity": "low",
+            "caveat": "需绕开后口袋，构图复杂"
+          }
+        ],
+        "B": [
+          {
+            "id": "jeans_B_single_back_pocket",
+            "face": "back",
+            "position_zh": "单边后口袋区域主图",
+            "position_en": "single back pocket area print",
+            "anchor_desc": "覆盖单个后口袋表面",
+            "size_hint": "8-10 cm 宽 x 9-11 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jeans_B_knee_single",
+            "face": "front",
+            "position_zh": "单腿膝盖位置主图",
+            "position_en": "knee single graphic",
+            "anchor_desc": "膝盖中心，单边",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jeans_B_thigh_outer_single",
+            "face": "side",
+            "position_zh": "大腿外侧单图主图",
+            "position_en": "thigh outer side single graphic",
+            "anchor_desc": "髋部下 4-6 cm，外侧居中",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "jeans_B_back_thigh_single",
+            "face": "back",
+            "position_zh": "后大腿单图主图",
+            "position_en": "back thigh single graphic",
+            "anchor_desc": "后口袋下 4-6 cm 单边",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "C": [
+          {
+            "id": "jeans_C_back_pocket_print",
+            "face": "back",
+            "position_zh": "后口袋单边小图案",
+            "position_en": "back pocket small accent",
+            "anchor_desc": "单个后口袋角落或居中小图",
+            "size_hint": "5-7 cm 宽 x 4-5 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jeans_C_knee_accent",
+            "face": "front",
+            "position_zh": "膝盖小图副图",
+            "position_en": "knee accent",
+            "anchor_desc": "膝盖中心小图",
+            "size_hint": "5-7 cm 宽 x 4-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jeans_C_inside_calf",
+            "face": "back",
+            "position_zh": "小腿内侧副图",
+            "position_en": "inside calf accent",
+            "anchor_desc": "小腿内侧近裤脚 4-6 cm",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "jeans_C_hem_near_outer",
+            "face": "side",
+            "position_zh": "近裤脚外侧副图",
+            "position_en": "near hem outer side",
+            "anchor_desc": "裤脚上方 4-6 cm，外侧",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "jeans_C_coin_pocket_area",
+            "face": "front",
+            "position_zh": "前小袋附近副图",
+            "position_en": "near front coin pocket",
+            "anchor_desc": "前小袋右下方 2-3 cm 留白",
+            "size_hint": "5-7 cm 宽 x 3-4 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "D": [
+          {
+            "id": "jeans_D_cuff_band",
+            "face": "side",
+            "position_zh": "裤脚边装饰带",
+            "position_en": "cuff hem band",
+            "anchor_desc": "裤脚边 1.5-3 cm 一圈",
+            "size_hint": "单元高 2-3 cm，沿裤脚一周",
+            "popularity": "very_high"
+          },
+          {
+            "id": "jeans_D_outer_side_stripe",
+            "face": "side",
+            "position_zh": "外侧缝装饰条",
+            "position_en": "outer side seam stripe",
+            "anchor_desc": "髋部至裤脚外侧缝沿线",
+            "size_hint": "线宽 1-2.5 cm，沿外缝",
+            "popularity": "high"
+          },
+          {
+            "id": "jeans_D_waistband_below",
+            "face": "back",
+            "position_zh": "腰头下方装饰带",
+            "position_en": "below-waistband band",
+            "anchor_desc": "腰头下方 0.5-1 cm 一圈",
+            "size_hint": "单元高 1.5-2.5 cm，沿腰头一周",
+            "popularity": "low"
+          },
+          {
+            "id": "jeans_D_back_pocket_top",
+            "face": "back",
+            "position_zh": "后口袋上沿装饰",
+            "position_en": "back pocket top edge trim",
+            "anchor_desc": "后口袋上沿 0.5-1 cm",
+            "size_hint": "单元高 ≤ 2 cm，沿口袋上沿",
+            "popularity": "medium"
+          },
+          {
+            "id": "jeans_D_inseam_decorative",
+            "face": "side",
+            "position_zh": "内缝装饰线模拟",
+            "position_en": "inseam decorative stitching simulation",
+            "anchor_desc": "内裆缝沿线",
+            "size_hint": "线宽 1-1.5 cm，沿内缝",
+            "popularity": "low"
+          }
+        ]
+      },
+      "禁动区域": [
+        "腰头与皮带环",
+        "前门襟拉链或纽扣",
+        "后口袋边缘缝线",
+        "皮标牌",
+        "金属铆钉",
+        "前小袋"
+      ]
+    },
+    "denim_shirt": {
+      "name_zh": "牛仔衬衫",
+      "name_en": "denim shirt",
+      "typical_age_range": "3-10 岁童装",
+      "key_features": [
+        "全开襟纽扣门襟",
+        "立领加翻领（衬衫领）",
+        "长袖加袖口纽扣",
+        "前胸单或双口袋（牛仔西部风常双口袋）",
+        "肩育克"
+      ],
+      "face_semantics": {
+        "front": {
+          "label_zh": "前身",
+          "label_en": "front",
+          "covers": "左右前片（被门襟分割）、左右胸口袋、前下摆"
+        },
+        "back": {
+          "label_zh": "后身",
+          "label_en": "back",
+          "covers": "肩育克、后背主面板、后腰、后下摆"
+        },
+        "side": {
+          "label_zh": "侧身",
+          "label_en": "side",
+          "covers": "左右长袖（外侧/内侧/袖口）、侧缝"
+        }
+      },
+      "placements": {
+        "A": [
+          {
+            "id": "shirt_A_back_center",
+            "face": "back",
+            "position_zh": "后背中央偏上整幅式大图",
+            "position_en": "upper back center oversized graphic",
+            "anchor_desc": "育克下方 3 cm 至后腰之间",
+            "size_hint": "16-20 cm 宽 x 14-18 cm 高",
+            "popularity": "high"
+          }
+        ],
+        "B": [
+          {
+            "id": "shirt_B_left_chest_above",
+            "face": "front",
+            "position_zh": "左胸口袋上方主图",
+            "position_en": "left chest above pocket",
+            "anchor_desc": "口袋翻盖上沿 1-2 cm 至肩缝之间",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "shirt_B_right_chest_above",
+            "face": "front",
+            "position_zh": "右胸口袋上方主图",
+            "position_en": "right chest above pocket",
+            "anchor_desc": "对称位置",
+            "size_hint": "8-10 cm 宽 x 7-9 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "shirt_B_back_upper_left",
+            "face": "back",
+            "position_zh": "后背左上主图",
+            "position_en": "back upper-left graphic",
+            "anchor_desc": "育克下方左侧 1/3 区域",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "shirt_B_back_upper_right",
+            "face": "back",
+            "position_zh": "后背右上主图",
+            "position_en": "back upper-right graphic",
+            "anchor_desc": "对称位置",
+            "size_hint": "10-12 cm 宽 x 9-11 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "shirt_B_back_lower_corner",
+            "face": "back",
+            "position_zh": "后背下角主图",
+            "position_en": "back lower corner graphic",
+            "anchor_desc": "后腰下方单边",
+            "size_hint": "8-10 cm 宽 x 8-10 cm 高",
+            "popularity": "low"
+          }
+        ],
+        "C": [
+          {
+            "id": "shirt_C_left_sleeve_mid",
+            "face": "side",
+            "position_zh": "左长袖外侧中部副图",
+            "position_en": "left sleeve outer mid",
+            "anchor_desc": "肩缝下 6-10 cm 至肘部之间，居中",
+            "size_hint": "5-7 cm 宽 x 4-6 cm 高",
+            "popularity": "very_high"
+          },
+          {
+            "id": "shirt_C_right_sleeve_mid",
+            "face": "side",
+            "position_zh": "右长袖外侧中部副图",
+            "position_en": "right sleeve outer mid",
+            "anchor_desc": "对称位置",
+            "size_hint": "5-7 cm 宽 x 4-6 cm 高",
+            "popularity": "high"
+          },
+          {
+            "id": "shirt_C_left_sleeve_above_cuff",
+            "face": "side",
+            "position_zh": "左袖肘部下方副图",
+            "position_en": "left sleeve below elbow",
+            "anchor_desc": "肘部下 3-5 cm 至袖口之间",
+            "size_hint": "5-7 cm 宽 x 4-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "shirt_C_back_lower_center",
+            "face": "back",
+            "position_zh": "后腰下方居中副图",
+            "position_en": "back lower center",
+            "anchor_desc": "后腰下方 3-5 cm 居中",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "medium"
+          },
+          {
+            "id": "shirt_C_front_hem_one_side",
+            "face": "front",
+            "position_zh": "前下摆单边副图",
+            "position_en": "front hem one-side",
+            "anchor_desc": "前下摆距门襟 6-8 cm 单边",
+            "size_hint": "5-7 cm 宽 x 3-5 cm 高",
+            "popularity": "low"
+          },
+          {
+            "id": "shirt_C_pocket_flap_area",
+            "face": "front",
+            "position_zh": "口袋翻盖区域副图",
+            "position_en": "chest pocket flap area",
+            "anchor_desc": "口袋翻盖正面或下沿",
+            "size_hint": "5-7 cm 宽 x 3-4 cm 高",
+            "popularity": "medium"
+          }
+        ],
+        "D": [
+          {
+            "id": "shirt_D_placket_band",
+            "face": "front",
+            "position_zh": "门襟纽扣条装饰",
+            "position_en": "placket button band trim",
+            "anchor_desc": "纽扣两侧 1.5-2 cm",
+            "size_hint": "单元宽 1.5-2.5 cm，沿门襟",
+            "popularity": "very_high"
+          },
+          {
+            "id": "shirt_D_collar_band",
+            "face": "front",
+            "position_zh": "领口或领台装饰带",
+            "position_en": "collar stand band",
+            "anchor_desc": "领台外沿一圈",
+            "size_hint": "单元高 1.5-2.5 cm，沿领台",
+            "popularity": "high"
+          },
+          {
+            "id": "shirt_D_cuff_band",
+            "face": "side",
+            "position_zh": "袖口装饰带",
+            "position_en": "cuff band",
+            "anchor_desc": "袖口边 1.5-2.5 cm 一圈",
+            "size_hint": "单元高 2-3 cm，沿袖口",
+            "popularity": "very_high"
+          },
+          {
+            "id": "shirt_D_hem_bottom_edge",
+            "face": "front",
+            "position_zh": "下摆下沿装饰",
+            "position_en": "bottom hem edge band",
+            "anchor_desc": "前后下摆 1-2 cm 一圈",
+            "size_hint": "单元高 2-3 cm，沿下摆",
+            "popularity": "medium"
+          },
+          {
+            "id": "shirt_D_yoke_seam",
+            "face": "back",
+            "position_zh": "肩育克缝装饰线",
+            "position_en": "yoke seam decorative line",
+            "anchor_desc": "肩育克下沿缝线",
+            "size_hint": "线宽 1-2 cm，沿育克缝",
+            "popularity": "low"
+          },
+          {
+            "id": "shirt_D_pocket_flap_top",
+            "face": "front",
+            "position_zh": "口袋翻盖上沿装饰",
+            "position_en": "pocket flap top edge",
+            "anchor_desc": "翻盖上沿 1-2 cm",
+            "size_hint": "单元高 ≤ 2 cm，沿翻盖上沿",
+            "popularity": "low"
+          }
+        ]
+      },
+      "禁动区域": [
+        "纽扣",
+        "领台缝线",
+        "袖口纽扣",
+        "口袋边缘缝线",
+        "皮标牌",
+        "肩缝",
+        "育克缝（除非作为 D 档装饰沿线设计）"
+      ]
+    }
+  },
+  "popularity_legend": {
+    "very_high": "首选位置，建议每款必出至少 1 个",
+    "high": "常规位置，频繁使用",
+    "medium": "可选位置，用于差异化时考虑",
+    "low": "进阶位置，仅在主题特别合适时使用"
+  },
+  "usage_for_agent": {
+    "selection_workflow": [
+      "1. 根据 款号 / 款式名 判断 category（denim_jacket / denim_tshirt / denim_jeans / denim_shirt）",
+      "2. 对该 category 下的 placements，按 tier（A/B/C/D）和 face（front/back/side）筛选",
+      "3. 在选定 cell（face x tier）下的 placement 列表中按 popularity 排序优先选",
+      "4. 每个锚点的 size_hint 作为初始尺寸建议，最终尺寸不得超过 tier_size_limits 中对应档的上限",
+      "5. 跨面组合需 ≥ 2 个锚点且 face 互不相同；三面组合需 3 个锚点 face 各异"
+    ],
+    "selection_constraints": [
+      "整方案最多 1 个 A 或 1 个 B（互斥）",
+      "整方案 0~3 个 C，0~2 个 D",
+      "9 色场景全集中 A 档方案 ≤ 1",
+      "全集中任一具体 placement.id 出现次数 ≤ 总色号数的 1/3",
+      "全集中每个 face（front/back/side）至少在 1/3 总色号数的方案中出现",
+      "跨面组合占比 ≥ 2/3，单面方案占比 ≤ 1/3"
+    ]
+  },
+  "version_history": [
+    {
+      "version": "1.0",
+      "date": "2026-05-19",
+      "changes": "初版：4 品类 x 4 档位 placement 枚举"
+    }
+  ]
+}

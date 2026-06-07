@@ -1,0 +1,69 @@
+Eval Report —— 山系户外童装花型TOP热榜_YK250609-牛仔服
+Source: ..\ai-supply\trend2design\山系户外童装花型TOP热榜_YK250609-牛仔服.json
+================================================================================
+
+── A. 结构完整性 ────────────────────────────────────────────────────
+  A_color_count_input                            9
+  A_color_count_with_plans                       9
+  A_expected_total_plans                         9
+  A_plan_completion_rate                         1.000
+  A_total_plans                                  9
+
+── B. 审计四项（硬性规则） ───────────────────────────────────────────────
+  B_a_tier_quota                                 1
+  B_audit1_face_dist_back                        8
+  B_audit1_face_dist_front                       6
+  B_audit1_face_dist_pass                        ✓
+  B_audit1_face_dist_side                        8
+  B_audit2_cross_face_count                      9
+  B_audit2_cross_face_pass                       ✓
+  B_audit2_cross_face_variety                    4
+  B_audit3_a_tier_pass                           ✓
+  B_audit3_a_tier_used                           0
+  B_audit4_diversity_cross_tier_count            9
+  B_audit4_diversity_pass                        ✓
+  B_audit4_diversity_single_tier_count           0
+  B_audit4_diversity_unique_positions            18
+  B_audit_overall_pass                           ✓
+  B_color_total                                  9
+  B_cross_face_threshold                         6
+  B_face_threshold                               3
+  B_plan_total                                   9
+
+── C. 字段填充质量 ───────────────────────────────────────────────────
+  C_anchors_filled_rate                          1.000
+  C_face_tier_complete_rate                      1.000
+  C_image_prompt_above_200_chars_rate            1.000
+  C_image_prompt_chars_avg                       2593.900
+  C_plan_desc_chars_avg                          21.000
+  C_plan_desc_within_50_chars_rate               1.000
+  C_plans_evaluated                              9
+  C_seven_section_complete_rate                  1.000
+  C_visual_relationship_filled_rate              1.000
+
+── D. 比例合规 ─────────────────────────────────────────────────────
+  D_colors_with_skip_reason                      0
+  D_gender_female_count                          4
+  D_gender_male_count                            4
+  D_gender_total_assigned                        9
+  D_gender_unisex_count                          1
+  D_recolor_needed_count                         8
+  D_recolor_skipped_count                        1
+  D_user_gender_ratio_request                    男女比接近1:1
+
+── E. 质量（模型自评，仅参考） ─────────────────────────────────────────────
+  E_adaptation_score_avg                         7.670
+  E_adaptation_score_max                         8
+  E_adaptation_score_min                         7
+  E_adaptation_score_stddev                      0.470
+  E_trend_description_chars                      52
+  E_trend_description_within_100                 ✓
+
+── F. 成本 ───────────────────────────────────────────────────────
+  F_agentic                                      ✗
+  F_elapsed_seconds                              198.080
+  F_llm_call_count_estimate                      1
+  F_model                                        gpt-5.5
+  F_tokens_input                                 90614
+  F_tokens_output                                18544
+  F_tokens_total                                 109158
