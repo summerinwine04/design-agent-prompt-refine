@@ -69,6 +69,44 @@ CREATE TABLE IF NOT EXISTS fixtures (
     description     TEXT,
     created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+
+-- M6: 生图任务（GenerationTask）
+CREATE TABLE IF NOT EXISTS generation_tasks (
+    id                   TEXT PRIMARY KEY,         -- 任务 ID（时间戳格式）
+    source_step2_run_id  TEXT NOT NULL,            -- 来源 step2 run
+    trend_name           TEXT NOT NULL,
+    style_no             TEXT NOT NULL,
+
+    -- 用户选了哪几个方案进生图（JSON array of plan_id）
+    selected_plan_ids    TEXT NOT NULL,
+
+    -- 决策⑥ 全量快照（防源数据后续变动）
+    snapshot_step1       TEXT,                     -- step1 JSON 完整快照
+    snapshot_step2_meta  TEXT,                     -- step2 final JSON 的款式分析 + 性别比规划部分
+    snapshot_plans       TEXT NOT NULL,            -- 选中方案的完整内容（含 图生图 prompt）
+
+    -- 状态
+    status               TEXT NOT NULL,            -- pending|running|completed|partial|failed
+    progress_done        INTEGER DEFAULT 0,        -- 已完成图数
+    progress_total       INTEGER NOT NULL,         -- 总图数 = len(selected_plan_ids)
+
+    -- 产出（JSON array of {plan_id, status, image_path, image_url, image_prompt_used, elapsed_ms, error}）
+    results              TEXT,
+
+    -- 元信息
+    image_root_dir       TEXT NOT NULL,            -- 实际图片所在磁盘目录
+    total_elapsed_ms     INTEGER,
+    total_cost_usd       REAL,                     -- 估算（gpt-image-2 约 $0.04-0.17/张）
+
+    created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    completed_at         TEXT,
+
+    FOREIGN KEY (source_step2_run_id) REFERENCES runs(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_created ON generation_tasks(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_source  ON generation_tasks(source_step2_run_id);
 """
 
 
@@ -187,5 +225,134 @@ def list_runs(*, limit: int = 100, fixture_id: str | None = None) -> list[dict]:
                 (limit,),
             ).fetchall()
         return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# M6: Generation Tasks CRUD
+# ============================================================================
+
+def insert_generation_task(
+    *,
+    task_id: str,
+    source_step2_run_id: str,
+    trend_name: str,
+    style_no: str,
+    selected_plan_ids: list[str],
+    snapshot_step1: dict | None,
+    snapshot_step2_meta: dict | None,
+    snapshot_plans: list[dict],
+    image_root_dir: str,
+) -> None:
+    """新建任务，status='pending'。"""
+    import json as _json
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO generation_tasks
+               (id, source_step2_run_id, trend_name, style_no,
+                selected_plan_ids, snapshot_step1, snapshot_step2_meta,
+                snapshot_plans, status, progress_done, progress_total,
+                image_root_dir)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?)""",
+            (
+                task_id, source_step2_run_id, trend_name, style_no,
+                _json.dumps(selected_plan_ids, ensure_ascii=False),
+                _json.dumps(snapshot_step1, ensure_ascii=False) if snapshot_step1 else None,
+                _json.dumps(snapshot_step2_meta, ensure_ascii=False) if snapshot_step2_meta else None,
+                _json.dumps(snapshot_plans, ensure_ascii=False),
+                len(selected_plan_ids),
+                image_root_dir,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_generation_task(task_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            """SELECT gt.*, r.prompt_bundle AS source_prompt_bundle
+               FROM generation_tasks gt
+               LEFT JOIN runs r ON gt.source_step2_run_id = r.id
+               WHERE gt.id = ?""",
+            (task_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def list_generation_tasks(*, limit: int = 100) -> list[dict]:
+    """JOIN 一下源 step2 run 的 prompt_bundle，方便前端显示用了哪些 prompt 版本。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT gt.*, r.prompt_bundle AS source_prompt_bundle
+               FROM generation_tasks gt
+               LEFT JOIN runs r ON gt.source_step2_run_id = r.id
+               ORDER BY gt.created_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def update_generation_task_progress(
+    *,
+    task_id: str,
+    status: str | None = None,
+    progress_done: int | None = None,
+    results: list[dict] | None = None,
+    total_elapsed_ms: int | None = None,
+    total_cost_usd: float | None = None,
+    completed_at: str | None = None,
+) -> None:
+    """部分字段更新——传 None 的字段不动。"""
+    import json as _json
+    updates = []
+    values: list = []
+    if status is not None:
+        updates.append("status = ?")
+        values.append(status)
+    if progress_done is not None:
+        updates.append("progress_done = ?")
+        values.append(progress_done)
+    if results is not None:
+        updates.append("results = ?")
+        values.append(_json.dumps(results, ensure_ascii=False))
+    if total_elapsed_ms is not None:
+        updates.append("total_elapsed_ms = ?")
+        values.append(total_elapsed_ms)
+    if total_cost_usd is not None:
+        updates.append("total_cost_usd = ?")
+        values.append(total_cost_usd)
+    if completed_at is not None:
+        updates.append("completed_at = ?")
+        values.append(completed_at)
+    if not updates:
+        return
+    values.append(task_id)
+    conn = get_conn()
+    try:
+        conn.execute(
+            f"UPDATE generation_tasks SET {', '.join(updates)} WHERE id = ?",
+            tuple(values),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_generation_task(task_id: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM generation_tasks WHERE id = ?", (task_id,))
+        conn.commit()
     finally:
         conn.close()

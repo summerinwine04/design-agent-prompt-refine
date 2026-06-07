@@ -2,6 +2,10 @@
 /api/v1/styles — 款图库浏览（只读）
 
 指向 ai-supply/款图/ 或 STYLES_ROOT 环境变量。
+
+URL 字段约定（由 main.py 把 /static/styles 静态挂载到 ai-supply/款图/ 实现）：
+  - 款图正面图：/static/styles/{style_no}.jpg
+  - 色号图    ：/static/styles/{style_no}/{filename}
 """
 
 from __future__ import annotations
@@ -34,16 +38,24 @@ async def list_styles():
     # 款号正面图 = {款号}.jpg，色号文件夹 = {款号}/
     for f in sorted(root.iterdir()):
         if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
-            color_dir = root / f.stem
-            color_count = (
-                len([p for p in color_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS])
-                if color_dir.is_dir() else 0
-            )
+            style_no = f.stem
+            color_dir = root / style_no
+            color_count = 0
+            cover_color_url = None
+            if color_dir.is_dir():
+                color_files = sorted(
+                    [p for p in color_dir.iterdir() if p.suffix.lower() in IMAGE_EXTENSIONS]
+                )
+                color_count = len(color_files)
+                if color_files:
+                    cover_color_url = f"/static/styles/{style_no}/{color_files[0].name}"
             styles.append({
-                "style_no": f.stem,
+                "style_no": style_no,
                 "ref_image": str(f),
+                "ref_image_url": f"/static/styles/{f.name}",       # 款图正面 URL
                 "color_folder": str(color_dir) if color_dir.is_dir() else None,
                 "color_count": color_count,
+                "cover_color_url": cover_color_url,                 # 第一个色号图 URL（封面）
             })
     return {"root": str(root), "styles": styles}
 
@@ -74,10 +86,12 @@ async def get_style(style_no: str):
                 "code": code,
                 "name": label,
                 "path": str(f),
+                "url": f"/static/styles/{style_no}/{f.name}",       # 色号图 URL（前端 img src）
             })
     return {
         "style_no": style_no,
         "ref_image": str(ref_file),
+        "ref_image_url": f"/static/styles/{ref_file.name}",
         "color_folder": str(color_dir) if color_dir.is_dir() else None,
         "colors": colors,
     }

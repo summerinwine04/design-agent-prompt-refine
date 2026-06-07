@@ -1,8 +1,8 @@
-import { Empty, Tabs, Button, Space, Tag } from "antd";
-import { useQuery } from "@tanstack/react-query";
+import { Empty, Tabs, Button, Space, Tag, Modal, message } from "antd";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 
-import { getNode } from "../../api/client";
+import { getNode, recognizeColor, redesignSingleColor } from "../../api/client";
 import { useRunStore } from "../../store/runStore";
 import FaceVisualizer from "../FaceVisualizer/FaceVisualizer";
 import PromptDrawer from "../PromptDrawer/PromptDrawer";
@@ -25,12 +25,84 @@ const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.7"]);
 
 export default function NodeDetailPanel() {
   const { currentRunId, selectedNodeId } = useRunStore();
+  const loadRun = useRunStore((s) => s.loadRun);
+  const forkFromCurrent = useRunStore((s) => s.forkFromCurrent);
+  const promptOverrides = useRunStore((s) => s.promptOverrides);
   const [promptDrawerOpen, setPromptDrawerOpen] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data, isLoading } = useQuery({
     queryKey: ["node", currentRunId, selectedNodeId],
     queryFn: () => getNode(currentRunId!, selectedNodeId!),
     enabled: !!currentRunId && !!selectedNodeId,
+  });
+
+  // 单色重设计 mutation（重识别后的级联）
+  const redesignMut = useMutation({
+    mutationFn: (payload: { color_code: string; color_name: string }) =>
+      redesignSingleColor(currentRunId!, payload),
+    onSuccess: async (result) => {
+      Modal.success({
+        title: `单色 2.4 方案重设计成功：${result.color_code}-${result.color_name}`,
+        content: (
+          <div style={{ fontSize: 12 }}>
+            <p>新生成方案数：{result.design_count}</p>
+            <p style={{ color: "#999", marginTop: 8 }}>
+              tokens in/out: {result.tokens_in}/{result.tokens_out} · {result.elapsed_sec?.toFixed(1)}s
+            </p>
+            <p style={{ color: "#999", fontSize: 11 }}>
+              其他 8 个色号方案保持不变。审计未重新跑——如要重新审计/触发 2.7 重设计，请走 Fork。
+            </p>
+          </div>
+        ),
+      });
+      queryClient.invalidateQueries({ queryKey: ["node", currentRunId, selectedNodeId] });
+      if (currentRunId) await loadRun(currentRunId);
+    },
+    onError: (err: any) => {
+      message.error("重设计失败：" + (err?.response?.data?.detail || err?.message));
+    },
+  });
+
+  // 单色重识别 mutation
+  const recognizeMut = useMutation({
+    mutationFn: (payload: { color_code: string; color_name: string }) =>
+      recognizeColor(currentRunId!, payload),
+    onSuccess: async (result) => {
+      Modal.confirm({
+        title: `重新识别成功：${result.color_code}-${result.color_name}`,
+        icon: null,
+        content: (
+          <div style={{ fontSize: 12 }}>
+            <p>新的识别底色：{result.new_output?.识别底色?.文字描述 || "—"}</p>
+            <p>是否需要变色：{result.new_output?.是否需要变色 ? "是" : "否"}</p>
+            <p style={{ color: "#999", marginTop: 8 }}>
+              tokens in/out: {result.tokens_in}/{result.tokens_out} · {result.elapsed_sec?.toFixed(1)}s
+            </p>
+            <p style={{ marginTop: 12, padding: 8, background: "#fffbe6", borderRadius: 4, fontSize: 11 }}>
+              ℹ <strong>下游 2.4 方案设计</strong>没有自动更新——它仍然是基于旧识别色出的。<br />
+              要让 2.4 方案也跟着新识别色重做（仅这一个色号、不动其他 8 色），点下方「继续重设计 2.4」。
+            </p>
+          </div>
+        ),
+        okText: "继续重设计该色号 2.4 →",
+        cancelText: "暂不更新下游",
+        okButtonProps: { type: "primary" },
+        width: 540,
+        onOk: () => {
+          // 触发 2.4 单色重设计
+          redesignMut.mutate({
+            color_code: result.color_code,
+            color_name: result.color_name,
+          });
+        },
+      });
+      queryClient.invalidateQueries({ queryKey: ["node", currentRunId, selectedNodeId] });
+      if (currentRunId) await loadRun(currentRunId);
+    },
+    onError: (err: any) => {
+      message.error("重新识别失败：" + (err?.response?.data?.detail || err?.message));
+    },
   });
 
   if (!selectedNodeId) {
@@ -41,6 +113,49 @@ export default function NodeDetailPanel() {
   const bizId = extractBizNumber(data.node_id);
   // 只对 LLM 类型 + 有对应 prompt 文件的节点显示「编辑 prompt」按钮
   const canEditPrompt = data.node_type === "llm" && PROMPT_NODES.has(bizId);
+
+  // 取 fork 入口的业务编号——loop 节点取前缀（"2.2.loop" → "2.2"）
+  const forkBizId = bizId.split(".").slice(0, 2).join(".");
+  const canFork = PROMPT_NODES.has(forkBizId) && !!currentRunId;
+
+  const handleFork = () => {
+    if (!currentRunId) return;
+    Modal.confirm({
+      title: `⑂ 从 ${forkBizId} 开始 Fork`,
+      content: (
+        <div>
+          <p>将基于当前 run <code>{currentRunId}</code> 创建新 run：</p>
+          <ul style={{ marginLeft: 16, fontSize: 12 }}>
+            <li>{forkBizId} 上游节点 → ⚡ 复用缓存（秒级）</li>
+            <li>{forkBizId} 及下游节点 → 真跑（烧 token）</li>
+          </ul>
+          {Object.keys(promptOverrides).length > 0 && (
+            <p style={{ fontSize: 12, color: "#666", marginTop: 8 }}>
+              当前 prompt overrides 将一同应用：
+              {Object.entries(promptOverrides).map(([k, v]) => `${k}=${v}`).join(", ")}
+            </p>
+          )}
+        </div>
+      ),
+      okText: "启动 Fork",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await forkFromCurrent(`node_${forkBizId}`, promptOverrides);
+          message.success("Fork 已启动 —— 可看 trace 树实时进度");
+        } catch (err: any) {
+          message.error("Fork 失败：" + (err?.response?.data?.detail || err?.message));
+        }
+      },
+    });
+  };
+
+  // 判断是否是颜色识别节点（2.2 单色或 2.2.loop 都可能）+ 是否失败/可重识别
+  const isColorNode = bizId === "2.2" && data.node_type === "llm";
+  const colorCode = data.input?.色号代码 || data.output?.色号代码;
+  const colorName = data.input?.营销色名 || data.output?.营销色名;
+  const isRecognitionFailed = data.output?._recognition_failed === true;
+  const canRecognize = isColorNode && !!colorCode && !!colorName;
 
   return (
     <div style={{ padding: 16 }}>
@@ -63,9 +178,21 @@ export default function NodeDetailPanel() {
             ⚙ 编辑 prompt
           </Button>
         )}
-        <Button>⑂ 从此节点 Fork</Button>
-        <Button>↻ 仅重跑此节点</Button>
-        <Button>📋 加入 fixture</Button>
+        {canRecognize && (
+          <Button
+            type={isRecognitionFailed ? "primary" : "default"}
+            danger={isRecognitionFailed}
+            loading={recognizeMut.isPending}
+            onClick={() => recognizeMut.mutate({ color_code: colorCode, color_name: colorName })}
+          >
+            ↻ 重新识别此色号{isRecognitionFailed ? "（修复失败）" : ""}
+          </Button>
+        )}
+        <Button disabled={!canFork} onClick={handleFork}>
+          ⑂ 从此节点 Fork
+        </Button>
+        <Button disabled>↻ 仅重跑此节点</Button>
+        <Button disabled>📋 加入 fixture</Button>
       </Space>
 
       <Tabs

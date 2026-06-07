@@ -71,6 +71,9 @@
 - **B 档**：最长边 ≤ 衣服宽幅的50%，单面覆盖面积占服装裁片 ≤ 30%，通常在正面或背面的单侧胸，或者单侧下方，也可在这几个位置呼应
 - **C 档**：最长边 ≤  衣服宽幅的10%，单面覆盖面积占服装裁片 ≤ 10%，通常是徽章或者logo图样
 - **D 档**：单元高度 ≤ 3 cm，可沿服装衣服下沿，裙沿，裤脚或袖延，边缘重复
+  - **环绕闭合默认**：边缘类印花默认沿所在边缘**完整环绕闭合一圈**（如袖口绕整个袖口开口一周、裤脚绕整个裤口一周、下摆绕前后身一圈），不是只在单侧贴一条；除非主题刻意要求局部断点设计
+  - **左右对称默认**：凡左右成对部位（**双袖口、双裤脚、双侧缝、左右领尖**）默认**左右镜像同款**——两只袖口、两条裤脚必须同时出现且图案一致镜像；若刻意做不对称（仅单侧 / 左右异款），必须在该锚点的「边界定位」中写明 `刻意不对称：<理由>`
+  - **前后连续默认**：袖口/下摆/裤脚的绕圈印花在正面与背面视角上应连续过渡，不得只在正面或只在背面出现半圈
 
 ## Placement 排除规则
 
@@ -87,6 +90,11 @@
 [EDIT TASK] 一句话说明本次编辑操作（仅加印花 OR 先按色号图变色再加印花），声明面组合与档组合
 [RECOLOR] 条件段：变色=true → 引用 Image 2 作为颜色参考；变色=false → 写 "Not required..."
 [LOCATION] 多锚点结构化模板，每个锚点：Face / Tier / Position / Size / Boundary；含 Visual relationship 一行
+  - **D 档 / 边缘类锚点强制写法**：Position 与 Boundary 必须显式写出"完整环绕 + 双侧对称 + 前后连续"，禁止只写单点。例：
+    - 袖口：`continuous trim wrapping fully around the entire cuff opening, identical and mirrored on BOTH the left and right sleeves, seamless across front and back views`
+    - 裤脚：`continuous border wrapping around the full circumference of BOTH pant hems (left and right), symmetric, continuous front-to-back`
+    - 下摆：`continuous band running fully around the bottom hem, wrapping continuously across front and back`
+  - 若该锚点为刻意单侧 / 不对称设计，Boundary 必须写明 `intentional asymmetry: <reason>`，否则一律按双侧对称 + 完整环绕生成
 [PATTERN] 图案视觉细节：元素、风格、线条、肌理、构图，明确性别定向声明
 [COLORS] 印花用色 2~5 色，Pantone+hex，明度差 ≥ 30%
 [PRESERVE] 严格保留 Image 1 中的面料肌理、口袋、纽扣、缝线、五金、洗水

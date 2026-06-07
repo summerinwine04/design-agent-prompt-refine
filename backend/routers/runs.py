@@ -20,6 +20,7 @@ import re
 import sys
 import time
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -344,6 +345,33 @@ async def fork_run(run_id: str, req: RunForkRequest):
     output_root = ROOT / "runs"
     output_root.mkdir(parents=True, exist_ok=True)
 
+    # 解析 from_node_id → 业务编号集合，加入 explicit_force_miss
+    # 支持 3 种格式："2.2" / "node_2.2" / "2_2_005" / "2_2_loop_002"
+    explicit_force_miss = set()
+    fnid = (req.from_node_id or "").strip()
+    if fnid.startswith("node_"):
+        fnid = fnid[len("node_"):]
+    if fnid:
+        # 如果包含 "_" 形如 "2_2_005"，去掉 counter 段，剩下的拼成 "2.2"
+        if "_" in fnid:
+            parts = fnid.split("_")
+            # 找第一个 ≥2 位纯数字段（counter），前面所有段为业务部分
+            biz_parts: list[str] = []
+            for p in parts:
+                if p.isdigit() and len(p) >= 2:
+                    break
+                biz_parts.append(p)
+            if biz_parts:
+                biz_id = ".".join(biz_parts)
+                # 形如 2.2.loop —— 取前两段作为业务编号
+                if "." in biz_id:
+                    # 保留前 2 段："2.2" / "2.4" 等
+                    biz_id = ".".join(biz_id.split(".")[:2])
+                if biz_id in {"2.1", "2.2", "2.3", "2.4", "2.7"}:
+                    explicit_force_miss.add(biz_id)
+        elif fnid in {"2.1", "2.2", "2.3", "2.4", "2.7"}:
+            explicit_force_miss.add(fnid)
+
     new_run = Step2Run(
         fixture=step2_fixture,
         bundle=bundle,
@@ -352,6 +380,7 @@ async def fork_run(run_id: str, req: RunForkRequest):
         config=config,
         verbose=False,
         replay_from_dir=src_run_dir,         # ← 关键：复用缓存
+        explicit_force_miss=explicit_force_miss,
     )
     new_run.writer.callback = make_trace_callback(new_run.run_id)
 
@@ -388,6 +417,572 @@ def _resolve_path_for_fork(fixture_dict: dict, key: str) -> str:
 @router.post("/{run_id}/nodes/{node_id}/retry", response_model=RunSummary)
 async def retry_node(run_id: str, node_id: str, req: NodeRetryRequest):
     raise HTTPException(501, "单节点 retry 在 M4.2+ 实装；目前用 fork 替代")
+
+
+# ============================================================================
+# 单色重识别（针对 2.2 失败的色号原地修复）
+# ============================================================================
+
+from pydantic import BaseModel as _BM
+
+class RecognizeColorRequest(_BM):
+    color_code: str
+    color_name: str
+
+
+@router.post("/{run_id}/recognize-color")
+async def recognize_color(run_id: str, req: RecognizeColorRequest):
+    """
+    对某 run 的某个色号原地重新跑一次 2.2 识别，结果覆盖该节点的 cache JSON。
+
+    适用场景：原 run 跑的时候 2.2 单色识别失败（被 2.2 容错跳过留下 _recognition_failed），
+    用户在工作台节点详情里点「↻ 重新识别」修复。
+
+    工作流：
+      1. 从 DB 拿 run 的 run_dir、prompt_bundle、fixture meta
+      2. 找该色号对应的 cache JSON 文件（用 slug 模糊匹配）
+      3. 拿原 input.user_prompt 当 prompt 再调一次 LLM
+      4. 解析新结果，覆盖 cache 文件的 output 字段
+      5. 返回新结果给前端
+
+    注意：这只修 cache，不重新跑下游 2.3/2.4。要重跑下游用 fork。
+    """
+    row = db_get_run(run_id)
+    if not row:
+        raise HTTPException(404, f"run {run_id} not found")
+    run_dir = Path(row["run_dir"])
+    if not run_dir.is_dir():
+        raise HTTPException(400, f"run_dir 不存在：{run_dir}")
+
+    # 找该色号对应的 cache JSON——slug 形如 颜色识别_DSC09253_中灰
+    target_slug_fragment = f"颜色识别_{req.color_code}_{req.color_name}"
+    candidates = []
+    for f in run_dir.glob("*.json"):
+        if f.name == "trace.jsonl" or f.name == "final_output.json":
+            continue
+        if target_slug_fragment in f.stem:
+            candidates.append(f)
+    if not candidates:
+        raise HTTPException(404, f"找不到该色号的 cache 文件：slug 含 '{target_slug_fragment}'")
+    cache_path = candidates[0]
+
+    cached_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    cached_input = cached_payload.get("input") or {}
+    user_prompt = cached_input.get("user_prompt")
+    if not user_prompt:
+        raise HTTPException(400, "原节点 input 中没有 user_prompt 字段，无法复用")
+
+    # 找色号样图——从源 fixture 推
+    src_trace = run_dir / "trace.jsonl"
+    color_folder_path = None
+    if src_trace.is_file():
+        try:
+            first_line = src_trace.read_text(encoding="utf-8").splitlines()[0]
+            fixture = json.loads(first_line).get("fixture") or {}
+            if "color_folder" in fixture:
+                color_folder_path = Path(fixture["color_folder"])
+        except Exception:
+            pass
+    if color_folder_path is None:
+        # 兜底：从 ai-supply 默认路径
+        color_folder_path = ROOT.parent / "ai-supply" / "款图" / row["style_no"]
+    if not color_folder_path.is_dir():
+        raise HTTPException(400, f"色号文件夹不存在：{color_folder_path}")
+
+    # 找色号样图文件名
+    color_filename_map = _parse_color_filename_map(color_folder_path)
+    color_img = color_filename_map.get((req.color_code, req.color_name))
+    if not color_img:
+        raise HTTPException(404, f"色号样图找不到：({req.color_code}, {req.color_name})")
+    color_img_path = color_folder_path / color_img
+
+    # 拿 prompt bundle 中 2.2 的 system prompt
+    from orchestrator.llm import LLMClient
+    from orchestrator.prompts import PromptBundle
+    bundle_dict = json.loads(row["prompt_bundle"]) if row.get("prompt_bundle") else {}
+    versions = {}
+    for k, v in bundle_dict.items():
+        if "@" in v:
+            versions[k] = v.rsplit("@", 1)[1]
+    bundle = PromptBundle(prompt_root=ROOT / "prompts" / "step2", versions=versions)
+    system_prompt, _ = bundle.load("2.2")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "OPENAI_API_KEY 未设置")
+    llm = LLMClient(api_key=api_key)
+
+    # 调 LLM（sync，在线程池跑）
+    loop = asyncio.get_running_loop()
+
+    def call_llm():
+        return llm.call_with_images(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[color_img_path],
+            output_marker_regex=r"##\s*STEP\s*2\.2\s*OUTPUT",
+        )
+
+    try:
+        result = await loop.run_in_executor(None, call_llm)
+    except Exception as e:
+        raise HTTPException(500, f"重新识别失败：{type(e).__name__}: {e}")
+
+    if result.parsed_json is None:
+        raise HTTPException(500, "模型输出无法解析为 JSON")
+
+    new_output = dict(result.parsed_json)
+    new_output.setdefault("色号代码", req.color_code)
+    new_output.setdefault("营销色名", req.color_name)
+    # 清除原失败标记（如果有）
+    new_output.pop("_recognition_failed", None)
+    new_output.pop("_error", None)
+
+    # 覆盖 cache 文件
+    cached_payload["output"] = new_output
+    cached_payload["_re_recognized_at"] = datetime.utcnow().isoformat() + "Z"
+    cache_path.write_text(
+        json.dumps(cached_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 翻盘 trace.jsonl 节点状态：追加一条 node_completed 事件，覆盖原 node_failed
+    # 前端 TraceTreePanel 按顺序处理事件，最后的 status 以最新的为准
+    node_id = _extract_node_id_from_cache_filename(cache_path.stem)
+    if node_id:
+        trace_path = run_dir / "trace.jsonl"
+        if trace_path.is_file():
+            child_event = {
+                "event": "node_completed",
+                "timestamp": time.time(),
+                "node_id": node_id,
+                "output_summary": {
+                    "_re_recognized": True,
+                    "色号代码": req.color_code,
+                    "营销色名": req.color_name,
+                    "是否需要变色": new_output.get("是否需要变色"),
+                },
+                "tokens": {"input": result.tokens_in, "output": result.tokens_out},
+                "elapsed_ms": int((result.elapsed_sec or 0) * 1000),
+            }
+            with open(trace_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(child_event, ensure_ascii=False) + "\n")
+                f.flush()
+
+            # 看父 loop 节点是否要一起翻盘
+            # 老 run 在 2.2 容错修复之前跑的，一个色号失败会让 gather 抛异常，
+            # 导致 loop 父节点也写 node_failed。这里重算父 loop 应有状态。
+            parent_id = _find_parent_node_id(trace_path, node_id)
+            if parent_id:
+                child_status_map = _compute_child_status_map(trace_path, parent_id)
+                if child_status_map and all(s == "succeeded" for s in child_status_map.values()):
+                    parent_event = {
+                        "event": "node_completed",
+                        "timestamp": time.time(),
+                        "node_id": parent_id,
+                        "output_summary": {
+                            "_re_recognized_triggered": True,
+                            "子节点数": len(child_status_map),
+                            "全部成功": True,
+                        },
+                    }
+                    with open(trace_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(parent_event, ensure_ascii=False) + "\n")
+                        f.flush()
+
+            # 再看整个 run 是否已经没有任何 failed 节点
+            # 是 → DB runs 表的 status 从 failed 翻成 succeeded_with_audit_warnings
+            # （保守做法：不知道审计实际是否通过，所以不动 audit_passed）
+            # 注意：直接 SQL UPDATE 单字段，不用 mark_run_finished —— 后者会把
+            #       audit/tokens/elapsed 全清空，破坏历史 run 信息
+            if row.get("status") == "failed" and not _has_any_failed_node(trace_path):
+                from backend.db import get_conn
+                conn = get_conn()
+                try:
+                    conn.execute(
+                        "UPDATE runs SET status = ? WHERE id = ?",
+                        ("succeeded_with_audit_warnings", run_id),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+    return {
+        "ok": True,
+        "color_code": req.color_code,
+        "color_name": req.color_name,
+        "new_output": new_output,
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        "elapsed_sec": result.elapsed_sec,
+        "cache_path": str(cache_path),
+        "node_id": node_id,
+    }
+
+
+def _extract_node_id_from_cache_filename(stem: str) -> str | None:
+    """从 cache 文件名（如 '2_2_005_颜色识别_DSC09253_中灰'）提取 node_id（'2_2_005'）。
+
+    规则：找到第一个 ≥2 位纯数字段，该段及之前所有段拼起来就是 node_id。
+    """
+    parts = stem.split("_")
+    for i, p in enumerate(parts):
+        if p.isdigit() and len(p) >= 2:
+            return "_".join(parts[: i + 1])
+    return None
+
+
+def _find_parent_node_id(trace_path: Path, node_id: str) -> str | None:
+    """从 trace.jsonl 找该 node_id 的 node_started 事件，提取 parent_id。"""
+    try:
+        for line in trace_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            if ev.get("event") == "node_started" and ev.get("node_id") == node_id:
+                return ev.get("parent_id")
+    except Exception:
+        pass
+    return None
+
+
+def _compute_child_status_map(trace_path: Path, parent_id: str) -> dict[str, str]:
+    """扫 trace.jsonl，返回 parent_id 下所有子节点的最终状态。
+
+    事件按时间顺序，后出现的状态覆盖前出现的（跟前端 TraceTreePanel 渲染逻辑一致）。
+    """
+    children = set()
+    status: dict[str, str] = {}
+    try:
+        for line in trace_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            event_type = ev.get("event")
+            nid = ev.get("node_id")
+            if not nid:
+                continue
+            if event_type == "node_started" and ev.get("parent_id") == parent_id:
+                children.add(nid)
+                status[nid] = "running"
+            elif event_type == "node_completed" and nid in children:
+                status[nid] = "succeeded"
+            elif event_type == "node_failed" and nid in children:
+                status[nid] = "failed"
+    except Exception:
+        pass
+    return status
+
+
+def _has_any_failed_node(trace_path: Path) -> bool:
+    """扫 trace.jsonl 看是否有任何节点最终状态是 failed。
+
+    按事件顺序处理，最后状态以最新事件为准——重识别追加的 node_completed
+    会自动覆盖原 node_failed。
+    """
+    status: dict[str, str] = {}
+    try:
+        for line in trace_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+            except Exception:
+                continue
+            event_type = ev.get("event")
+            nid = ev.get("node_id")
+            if not nid:
+                continue
+            if event_type == "node_started":
+                status[nid] = "running"
+            elif event_type == "node_completed":
+                status[nid] = "succeeded"
+            elif event_type == "node_failed":
+                status[nid] = "failed"
+    except Exception:
+        pass
+    return any(s == "failed" for s in status.values())
+
+
+class RedesignSingleColorRequest(_BM):
+    color_code: str
+    color_name: str
+
+
+@router.post("/{run_id}/redesign-single-color")
+async def redesign_single_color(run_id: str, req: RedesignSingleColorRequest):
+    """
+    对某 run 的某个色号原地重跑 2.4 单色设计——其他 8 色不动。
+
+    适用场景：单色重识别后，希望"让这一个色号的方案也跟着新识别色重新出一遍"。
+    （Fork 是整组 9 色都重跑，太重；这是单色精确级联）
+
+    工作流：
+      1. 找该色号的 2.4 cache JSON
+      2. 复用原 input.user_prompt（含累积状态，其他色号未变所以仍适用）
+      3. 加载 prompt_bundle 里 2.4 的 system_prompt
+      4. 调一次 LLM（款图 + 该色号样图）
+      5. 覆盖 cache JSON 的 output 字段
+      6. 追加 trace.jsonl 的 node_completed 事件
+
+    注意：不重跑 2.5 审计 —— 单色变化对全局审计影响小，若想重新审计请走 Fork。
+    """
+    row = db_get_run(run_id)
+    if not row:
+        raise HTTPException(404, f"run {run_id} not found")
+    run_dir = Path(row["run_dir"])
+    if not run_dir.is_dir():
+        raise HTTPException(400, f"run_dir 不存在：{run_dir}")
+
+    # 找该色号的 2.4 cache（slug 含 单色设计_{code}_{name}）
+    target_slug_fragment = f"单色设计_{req.color_code}_{req.color_name}"
+    candidates = []
+    for f in run_dir.glob("*.json"):
+        if f.name in {"trace.jsonl", "final_output.json"}:
+            continue
+        if target_slug_fragment in f.stem and "2_4" in f.stem:
+            candidates.append(f)
+    if not candidates:
+        raise HTTPException(404, f"找不到该色号的 2.4 cache 文件：slug 含 '{target_slug_fragment}'")
+    # 多个候选时取最近修改的（如果之前有重设计版本）
+    cache_path = max(candidates, key=lambda p: p.stat().st_mtime)
+
+    cached_payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    cached_input = cached_payload.get("input") or {}
+    original_user_prompt = cached_input.get("user_prompt")
+    if not original_user_prompt:
+        raise HTTPException(400, "原 2.4 节点 input 中没有 user_prompt 字段")
+
+    # 关键：把 2.2 重识别后的新识别色文字描述 注入 user_prompt
+    # （否则 LLM 拿到的还是旧识别色，重设计就没意义）
+    new_recognition = _load_latest_color_recognition(run_dir, req.color_code, req.color_name)
+    user_prompt = original_user_prompt
+    if new_recognition:
+        user_prompt = _replace_recognition_in_prompt(
+            original_user_prompt, new_recognition,
+        )
+
+    # 找款图 + 色号样图
+    src_trace = run_dir / "trace.jsonl"
+    ref_image_path = None
+    color_folder_path = None
+    if src_trace.is_file():
+        try:
+            first_line = src_trace.read_text(encoding="utf-8").splitlines()[0]
+            fixture = json.loads(first_line).get("fixture") or {}
+            if "ref_image" in fixture or "ref_image_path" in fixture:
+                ref_image_path = Path(fixture.get("ref_image") or fixture.get("ref_image_path"))
+            if "color_folder" in fixture:
+                color_folder_path = Path(fixture["color_folder"])
+        except Exception:
+            pass
+    if ref_image_path is None or not ref_image_path.is_file():
+        ref_image_path = ROOT.parent / "ai-supply" / "款图" / f"{row['style_no']}.jpg"
+    if color_folder_path is None or not color_folder_path.is_dir():
+        color_folder_path = ROOT.parent / "ai-supply" / "款图" / row["style_no"]
+    if not ref_image_path.is_file():
+        raise HTTPException(400, f"款图找不到：{ref_image_path}")
+
+    color_filename_map = _parse_color_filename_map(color_folder_path)
+    color_img = color_filename_map.get((req.color_code, req.color_name))
+    if not color_img:
+        raise HTTPException(404, f"色号样图找不到：({req.color_code}, {req.color_name})")
+    color_img_path = color_folder_path / color_img
+
+    # 加载 2.4 system prompt（按 run 的 bundle 版本）
+    from orchestrator.llm import LLMClient
+    from orchestrator.prompts import PromptBundle
+    bundle_dict = json.loads(row["prompt_bundle"]) if row.get("prompt_bundle") else {}
+    versions = {}
+    for k, v in bundle_dict.items():
+        if "@" in v:
+            versions[k] = v.rsplit("@", 1)[1]
+    bundle = PromptBundle(prompt_root=ROOT / "prompts" / "step2", versions=versions)
+    system_prompt, _ = bundle.load("2.4")
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(400, "OPENAI_API_KEY 未设置")
+    llm = LLMClient(api_key=api_key)
+
+    loop = asyncio.get_running_loop()
+
+    def call_llm():
+        return llm.call_with_images(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            image_paths=[ref_image_path, color_img_path],
+            output_marker_regex=r"##\s*STEP\s*2\.4\s*OUTPUT",
+        )
+
+    try:
+        result = await loop.run_in_executor(None, call_llm)
+    except Exception as e:
+        raise HTTPException(500, f"重设计失败：{type(e).__name__}: {e}")
+
+    if result.parsed_json is None:
+        raise HTTPException(500, "2.4 模型输出无法解析为 JSON")
+
+    new_output = dict(result.parsed_json)
+    new_output.setdefault("色号代码", req.color_code)
+    new_output.setdefault("营销色名", req.color_name)
+    # 清除原跳过标记（如果有）
+    new_output.pop("_skipped", None)
+    new_output.pop("_skip_reason", None)
+
+    # 覆盖 cache 文件
+    cached_payload["output"] = new_output
+    cached_payload["_re_designed_at"] = datetime.utcnow().isoformat() + "Z"
+    cache_path.write_text(
+        json.dumps(cached_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 翻盘 trace 节点状态
+    node_id = _extract_node_id_from_cache_filename(cache_path.stem)
+    if node_id:
+        trace_path = run_dir / "trace.jsonl"
+        if trace_path.is_file():
+            child_event = {
+                "event": "node_completed",
+                "timestamp": time.time(),
+                "node_id": node_id,
+                "output_summary": {
+                    "_re_designed": True,
+                    "色号代码": req.color_code,
+                    "营销色名": req.color_name,
+                    "设计方案数": len(new_output.get("设计方案", [])),
+                },
+                "tokens": {"input": result.tokens_in, "output": result.tokens_out},
+                "elapsed_ms": int((result.elapsed_sec or 0) * 1000),
+            }
+            with open(trace_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(child_event, ensure_ascii=False) + "\n")
+                f.flush()
+
+            # 看 2.4 loop 父节点是否能翻盘
+            parent_id = _find_parent_node_id(trace_path, node_id)
+            if parent_id:
+                child_status_map = _compute_child_status_map(trace_path, parent_id)
+                if child_status_map and all(s == "succeeded" for s in child_status_map.values()):
+                    parent_event = {
+                        "event": "node_completed",
+                        "timestamp": time.time(),
+                        "node_id": parent_id,
+                        "output_summary": {
+                            "_re_designed_triggered": True,
+                            "子节点数": len(child_status_map),
+                            "全部成功": True,
+                        },
+                    }
+                    with open(trace_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(parent_event, ensure_ascii=False) + "\n")
+                        f.flush()
+
+            # 整 run 无 failed 节点 → DB status 翻盘
+            if row.get("status") == "failed" and not _has_any_failed_node(trace_path):
+                from backend.db import get_conn
+                conn = get_conn()
+                try:
+                    conn.execute(
+                        "UPDATE runs SET status = ? WHERE id = ?",
+                        ("succeeded_with_audit_warnings", run_id),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
+
+    return {
+        "ok": True,
+        "color_code": req.color_code,
+        "color_name": req.color_name,
+        "new_output": new_output,
+        "design_count": len(new_output.get("设计方案", [])),
+        "tokens_in": result.tokens_in,
+        "tokens_out": result.tokens_out,
+        "elapsed_sec": result.elapsed_sec,
+        "cache_path": str(cache_path),
+        "node_id": node_id,
+    }
+
+
+def _load_latest_color_recognition(run_dir: Path, color_code: str, color_name: str) -> dict | None:
+    """从 2.2 节点 cache 加载该色号最新识别结果。"""
+    target = f"颜色识别_{color_code}_{color_name}"
+    for f in run_dir.glob("*.json"):
+        if f.name in {"trace.jsonl", "final_output.json"}:
+            continue
+        if target in f.stem and "2_2" in f.stem:
+            try:
+                payload = json.loads(f.read_text(encoding="utf-8"))
+                return payload.get("output")
+            except Exception:
+                continue
+    return None
+
+
+def _replace_recognition_in_prompt(prompt: str, new_recog: dict) -> str:
+    """在 2.4 user_prompt 中重新替换识别结果相关字段。
+
+    2.4 prompt 模板里这一段（来自 04_single_color_design.md USER PROMPT TEMPLATE）：
+      - 识别底色：{{识别底色}}
+      - 是否需要变色：{{是否需要变色}}
+      - 变色描述：{{变色描述}}
+
+    渲染后是固定文本（如「识别底色：{"文字描述":"中灰...","近似Pantone":"...",...}」）。
+    我们用正则替换这几行。
+    """
+    new_recog_json = json.dumps(new_recog.get("识别底色") or {}, ensure_ascii=False)
+    needs_recolor = new_recog.get("是否需要变色", False)
+    recolor_desc = new_recog.get("变色描述") or ""
+
+    # 替换"识别底色"这一行
+    prompt = re.sub(
+        r"(- 识别底色：).*",
+        lambda m: m.group(1) + new_recog_json,
+        prompt,
+        count=1,
+    )
+    # 替换"是否需要变色"
+    prompt = re.sub(
+        r"(- 是否需要变色：).*",
+        lambda m: m.group(1) + str(needs_recolor),
+        prompt,
+        count=1,
+    )
+    # 替换"变色描述"
+    prompt = re.sub(
+        r"(- 变色描述：).*",
+        lambda m: m.group(1) + recolor_desc,
+        prompt,
+        count=1,
+    )
+    return prompt
+
+
+def _parse_color_filename_map(folder: Path) -> dict[tuple[str, str], str]:
+    """扫描色号目录建 (code, name) → 文件名 映射。"""
+    out: dict[tuple[str, str], str] = {}
+    if not folder.is_dir():
+        return out
+    pattern = re.compile(r'^([^(（]+)[（(]([^)）]+)[)）]')
+    for f in sorted(folder.iterdir()):
+        if f.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        m = pattern.match(f.stem)
+        if not m:
+            continue
+        code = m.group(1).strip()
+        raw = m.group(2).strip()
+        name = re.sub(r'(已使用|不用|备用|未用|待定).*$', '', raw).strip() or raw
+        out[(code, name)] = f.name
+    return out
 
 
 # ============================================================================

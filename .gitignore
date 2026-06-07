@@ -13,7 +13,16 @@ frontend/.vite/
 
 # Local data
 data/metadata.db
+data/task_images/
 runs/
+
+# Logs
+*.log
+
+# 备份/临时
+*.bak
+*~
+*.tmp
 
 # IDE
 .vscode/

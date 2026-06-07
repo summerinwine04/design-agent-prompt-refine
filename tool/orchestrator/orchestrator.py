@@ -119,6 +119,8 @@ class Step2Run:
         event_callback: Callable[[TraceEvent], None] | None = None,
         verbose: bool = True,
         replay_from_dir: Path | None = None,    # M4 fork
+        explicit_force_miss: set | None = None,  # 用户显式指定从该业务节点开始 force_miss
+                                                  # 如 {"2.4"} → 2.4 + 下游全部重跑，不管 prompt 改没改
     ):
         self.fixture = fixture
         self.bundle = bundle
@@ -127,6 +129,7 @@ class Step2Run:
         self.output_root = Path(output_root)
         self.event_callback = event_callback
         self.replay_from_dir = Path(replay_from_dir) if replay_from_dir else None
+        self.explicit_force_miss = set(explicit_force_miss) if explicit_force_miss else set()
 
         self.base_name = f"{fixture.trend_name}_{fixture.style_no}"
         self.work_dir = self.output_root / self.base_name
@@ -146,6 +149,9 @@ class Step2Run:
 
         # 预扫源 run_dir 的缓存 + 计算 force_miss 集合
         self.replay_cache, self.force_miss_node_ids = self._build_replay_state()
+        # 用户显式指定的"从此节点开始重跑"也加入 force_miss（含下游级联）
+        for explicit_node in self.explicit_force_miss:
+            self.force_miss_node_ids |= self._DOWNSTREAM.get(explicit_node, {explicit_node})
         # 调试日志：把 cache 装载状态打印出来（fork 时排查用）
         if self.replay_from_dir:
             print(

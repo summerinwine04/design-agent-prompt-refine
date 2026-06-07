@@ -39,6 +39,7 @@ from backend.routers import (
     runs,
     settings,
     styles,
+    tasks,
     trends,
 )
 
@@ -91,6 +92,7 @@ app.include_router(fixtures.router, prefix="/api/v1/fixtures", tags=["fixtures"]
 app.include_router(trends.router,   prefix="/api/v1/trends",   tags=["trends"])
 app.include_router(styles.router,   prefix="/api/v1/styles",   tags=["styles"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
+app.include_router(tasks.router,    prefix="/api/v1/tasks",    tags=["tasks"])    # M6/M7 生图任务
 
 
 # ----- 静态资源挂载 ----- #
@@ -100,6 +102,31 @@ app.mount(
     StaticFiles(directory=str(ROOT / "runs"), check_dir=False),
     name="runs-static",
 )
+
+# M6 静态资源：生图任务的图片 + 款图 + 趋势报告页图
+# 生图结果图片
+(ROOT / "data" / "task_images").mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/static/tasks",
+    StaticFiles(directory=str(ROOT / "data" / "task_images"), check_dir=False),
+    name="tasks-static",
+)
+# 款图（来自 sibling ai-supply）
+_styles_dir = ROOT.parent / "ai-supply" / "款图"
+if _styles_dir.is_dir():
+    app.mount(
+        "/static/styles",
+        StaticFiles(directory=str(_styles_dir), check_dir=False),
+        name="styles-static",
+    )
+# 趋势报告页图
+_trends_dir = ROOT.parent / "ai-supply" / "趋势报告"
+if _trends_dir.is_dir():
+    app.mount(
+        "/static/trends",
+        StaticFiles(directory=str(_trends_dir), check_dir=False),
+        name="trends-static",
+    )
 
 
 @app.on_event("startup")

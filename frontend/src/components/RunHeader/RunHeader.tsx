@@ -1,5 +1,6 @@
-import { Tag, Space, Statistic } from "antd";
+import { Tag, Space, Statistic, Button } from "antd";
 import { useMemo } from "react";
+import { Link } from "react-router-dom";
 
 import { useRunStore } from "../../store/runStore";
 
@@ -61,33 +62,46 @@ export default function RunHeader() {
     );
   }
 
+  // 仅"完整跑完"的状态显示生图入口
+  const canStartGeneration =
+    !!currentRunId &&
+    (status === "succeeded" || status === "succeeded_with_audit_warnings");
+
   return (
     <div style={{ padding: "8px 16px", background: "#fff", borderBottom: "1px solid #eee" }}>
-      <Space size="large" wrap>
-        <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#666" }}>
-          {currentRunId}
-        </span>
-        <Tag color={STATUS_COLOR[status]}>{status}</Tag>
-        <Statistic
-          title="已完成节点"
-          value={stats.nodesCompleted}
-          suffix={`/ ${stats.nodesStarted}`}
-          valueStyle={{ fontSize: 14 }}
-        />
-        <Statistic
-          title="累计 token"
-          value={stats.tokensIn + stats.tokensOut}
-          formatter={(v) => formatNumber(Number(v))}
-          valueStyle={{ fontSize: 14 }}
-        />
-        <Statistic
-          title="累计耗时"
-          value={(stats.elapsedMs / 1000).toFixed(1)}
-          suffix="s"
-          valueStyle={{ fontSize: 14 }}
-        />
-        {stats.nodesFailed > 0 && (
-          <Tag color="red">{stats.nodesFailed} 节点失败</Tag>
+      <Space size="large" wrap style={{ width: "100%", justifyContent: "space-between" }}>
+        <Space size="large" wrap>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#666" }}>
+            {currentRunId}
+          </span>
+          <Tag color={STATUS_COLOR[status]}>{status}</Tag>
+          <Statistic
+            title="已完成节点"
+            value={stats.nodesCompleted}
+            suffix={`/ ${stats.nodesStarted}`}
+            valueStyle={{ fontSize: 14 }}
+          />
+          <Statistic
+            title="累计 token"
+            value={stats.tokensIn + stats.tokensOut}
+            formatter={(v) => formatNumber(Number(v))}
+            valueStyle={{ fontSize: 14 }}
+          />
+          <Statistic
+            title="累计耗时"
+            value={(stats.elapsedMs / 1000).toFixed(1)}
+            suffix="s"
+            valueStyle={{ fontSize: 14 }}
+          />
+          {stats.nodesFailed > 0 && (
+            <Tag color="red">{stats.nodesFailed} 节点失败</Tag>
+          )}
+        </Space>
+
+        {canStartGeneration && (
+          <Link to={`/tasks/new?run=${currentRunId}`}>
+            <Button type="primary">→ 应用方案生图</Button>
+          </Link>
         )}
       </Space>
     </div>

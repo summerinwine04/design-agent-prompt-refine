@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { listTrends, listStyles, listFixtures, listRuns } from "../../api/client";
+import { listTrends, listStyles, listFixtures, listRuns, getStyle } from "../../api/client";
 import { useRunStore } from "../../store/runStore";
 
 
@@ -132,6 +132,10 @@ export default function InputsPanel() {
           >
             <Select placeholder="选款号..." options={styleOptions} />
           </Form.Item>
+
+          {/* 款号预览：选了款号后显示款图 + 一张色号图 */}
+          <StylePreview formInstance={form} />
+
 
           <Form.Item
             label="性别比"
@@ -273,5 +277,99 @@ export default function InputsPanel() {
         )}
       </Card>
     </Space>
+  );
+}
+
+
+/**
+ * 款号预览：选了款号后显示款图正面 + 一张色号图缩略
+ * 用户可点切换查看不同色号
+ */
+function StylePreview({ formInstance }: { formInstance: any }) {
+  const styleNo = Form.useWatch("style_no", formInstance);
+  const [colorIdx, setColorIdx] = useState(0);
+
+  const { data: styleDetail } = useQuery({
+    queryKey: ["style-detail", styleNo],
+    queryFn: () => getStyle(styleNo),
+    enabled: !!styleNo,
+  });
+
+  if (!styleNo || !styleDetail) {
+    return null;
+  }
+
+  const colors = styleDetail.colors || [];
+  const currentColor = colors[colorIdx % colors.length];
+
+  return (
+    <div style={{ marginTop: -8, marginBottom: 12, padding: 8, background: "#fafafa", borderRadius: 4 }}>
+      <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>预览</div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {/* 款图正面 */}
+        <div style={{ textAlign: "center" }}>
+          <img
+            src={styleDetail.ref_image_url}
+            alt={styleNo}
+            style={{
+              width: "100%",
+              aspectRatio: "1",
+              objectFit: "cover",
+              borderRadius: 4,
+              border: "1px solid #eee",
+              background: "#fff",
+            }}
+            onError={(e: any) => { e.target.style.opacity = "0.3"; }}
+          />
+          <div style={{ fontSize: 10, color: "#888", marginTop: 2 }}>款图正面</div>
+        </div>
+
+        {/* 色号图 */}
+        {currentColor ? (
+          <div style={{ textAlign: "center" }}>
+            <img
+              src={currentColor.url}
+              alt={currentColor.name}
+              style={{
+                width: "100%",
+                aspectRatio: "1",
+                objectFit: "cover",
+                borderRadius: 4,
+                border: "1px solid #eee",
+                background: "#fff",
+              }}
+              onError={(e: any) => { e.target.style.opacity = "0.3"; }}
+            />
+            <div style={{ fontSize: 10, color: "#888", marginTop: 2 }}>
+              {currentColor.code} · <strong>{currentColor.name}</strong>
+            </div>
+          </div>
+        ) : (
+          <div style={{ textAlign: "center", color: "#999", fontSize: 11 }}>暂无色号</div>
+        )}
+      </div>
+
+      {/* 色号切换 */}
+      {colors.length > 1 && (
+        <div style={{ display: "flex", justifyContent: "center", gap: 4, marginTop: 6 }}>
+          <Button
+            size="small"
+            icon={<span>◀</span>}
+            onClick={() => setColorIdx((i) => (i - 1 + colors.length) % colors.length)}
+            style={{ height: 20, fontSize: 10 }}
+          />
+          <span style={{ fontSize: 10, color: "#999", alignSelf: "center" }}>
+            {(colorIdx % colors.length) + 1} / {colors.length}
+          </span>
+          <Button
+            size="small"
+            icon={<span>▶</span>}
+            onClick={() => setColorIdx((i) => (i + 1) % colors.length)}
+            style={{ height: 20, fontSize: 10 }}
+          />
+        </div>
+      )}
+    </div>
   );
 }

@@ -138,7 +138,7 @@ _SUPPORTED_SIZES = [
 
 def get_aligned_size(path: Path, logger: logging.Logger | None = None) -> str:
     """
-    读取图片实际像素尺寸，从 gpt-image-1 支持的三档中选最近长宽比的一档。
+    读取图片实际像素尺寸，从 gpt-image-2 支持的三档中选最近长宽比的一档。
     支持档位：1024x1024 / 1024x1536 / 1536x1024。
     读取失败时回退至 '1024x1024'。
     """

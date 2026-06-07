@@ -293,7 +293,8 @@ async def node_2_2_color_recognition_all(
     parent_id: str | None = None,
     concurrency: int = 3,
 ) -> list[dict]:
-    """对全部色号做颜色识别，最多 concurrency 个并发。"""
+    """对全部色号做颜色识别，最多 concurrency 个并发。
+    任一色号失败不影响其他色号——失败的返回带 _recognition_failed 占位。"""
     base_color = style_analysis.get("款式分析", {}).get("款图底色", {})
 
     with ctx.writer.node(
@@ -305,14 +306,30 @@ async def node_2_2_color_recognition_all(
 
         async def _run_one(item):
             async with sem:
-                return await node_2_2_color_recognition_one(
-                    ctx, item, base_color, parent_id=parent.node_id
-                )
+                try:
+                    return await node_2_2_color_recognition_one(
+                        ctx, item, base_color, parent_id=parent.node_id
+                    )
+                except Exception as e:
+                    # 单色失败不影响其他色号
+                    err = f"{type(e).__name__}: {e}"
+                    return {
+                        "色号代码": item["code"],
+                        "营销色名": item["name"],
+                        "_recognition_failed": True,
+                        "_error": err,
+                        "是否需要变色": False,
+                        "识别底色": None,
+                        "变色描述": None,
+                    }
 
         results = await asyncio.gather(*[_run_one(c) for c in ctx.color_items])
+        failed = [r for r in results if r.get("_recognition_failed")]
         parent.set_output({
             "色号数": len(results),
             "需变色数": sum(1 for r in results if r.get("是否需要变色")),
+            "识别失败数": len(failed),
+            "识别失败色号": [r["色号代码"] + "·" + r["营销色名"] for r in failed],
         })
     return results
 
@@ -532,10 +549,26 @@ async def node_2_4_all_colors(
         parent_id=parent_id,
     ) as parent:
         all_color_outputs: list[dict] = []
+        skipped_count = 0
         for color_item in ctx.color_items:
             code = color_item["code"]
             gender = gender_lookup.get(code, "中性")
             recog = recog_lookup.get(code, {"色号代码": code, "营销色名": color_item["name"]})
+
+            # 2.2 识别失败的色号 → 跳过 2.4 LLM 调用，留占位
+            if recog.get("_recognition_failed"):
+                skipped_count += 1
+                all_color_outputs.append({
+                    "色号代码": code,
+                    "营销色名": color_item["name"],
+                    "性别定向": gender,
+                    "_skipped": True,
+                    "_skip_reason": f"2.2 识别失败：{recog.get('_error', '未知')}；可手动重识别后再设计",
+                    "设计方案": [],
+                    "无方案时的跳过原因": "上游 2.2 颜色识别失败",
+                })
+                continue
+
             out = await node_2_4_single_color_design(
                 ctx,
                 color_item=color_item,
@@ -551,6 +584,7 @@ async def node_2_4_all_colors(
 
         parent.set_output({
             "色号数": len(all_color_outputs),
+            "跳过数（2.2 失败）": skipped_count,
             "A档已用次数": accumulated.a_tier_used,
             "已用面组合": dict(accumulated.used_face_combos),
         })
