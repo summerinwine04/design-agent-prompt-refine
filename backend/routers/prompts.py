@@ -26,11 +26,17 @@ PROMPTS_DIR = Path(__file__).parent.parent.parent / "prompts" / "step2"
 
 # 子节点 → 当前 prompt 文件名（与 orchestrator/prompts.py 中 DEFAULT_PROMPT_FILES 对齐）
 NODE_FILES = {
+    # v4 节点映射（旧 04_single_color_design / 04b_redesign 保留为 v3 历史快照不删，不在此映射）
     "2.1": "01_style_analysis.md",
     "2.2": "02_color_recognition.md",
     "2.3": "03_gender_planning.md",
-    "2.4": "04_single_color_design.md",
-    "2.7": "04b_redesign_constraint.md",
+    "2.4": "04_topic_selection.md",
+    "2.5": "05_single_color_design.md",
+    "2.8": "05b_redesign_constraint.md",
+    # v5 CONVERGE 图（强单主题 / 上下装成套）专用节点
+    "2.4s": "04s_single_topic_selection.md",
+    "2.4.5": "045_pattern_blueprint.md",
+    "2.5L": "05L_look_variant_design.md",
 }
 
 

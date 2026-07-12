@@ -3,6 +3,7 @@ openai>=1.40.0
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
+python-multipart>=0.0.9  # FastAPI File/Form 上传（趋势 PDF 导入）
 
 # Optional：图像尺寸检测（step3 用，CLI 也用）
 Pillow>=10.4.0

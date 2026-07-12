@@ -82,11 +82,18 @@ def list_unresolved_placeholders(rendered: str) -> list[str]:
 
 # 子节点 → 默认 prompt 文件名（在 prompt/step2/ 下）
 DEFAULT_PROMPT_FILES = {
+    # v4 节点结构（旧 04_single_color_design / 04b_redesign 保留为历史快照不删，不在此映射）
     "2.1": "01_style_analysis.md",
     "2.2": "02_color_recognition.md",
     "2.3": "03_gender_planning.md",
-    "2.4": "04_single_color_design.md",
-    "2.7": "04b_redesign_constraint.md",  # 局部重设计，复用 2.4 的 system，单独的 user 模板
+    "2.4": "04_topic_selection.md",            # v4 新增：趋势主题选择
+    "2.5": "05_single_color_design.md",
+    "2.8": "05b_redesign_constraint.md",       # 局部重设计，复用 2.5 的 system，单独的 user 模板
+    # v5 CONVERGE 图（强单主题 / Collection）专用节点。
+    # DIVERGE 图（MULTI_TOPIC 现状）不加载这三个文件，Mode A 完全免疫。
+    "2.4s": "04s_single_topic_selection.md",   # v5：单主题选择（收敛模式，选且仅选 1 个）
+    "2.4.5": "045_pattern_blueprint.md",       # v5：母图案 Blueprint 设计
+    "2.5L": "05L_look_variant_design.md",      # v5：按 look 联合变体设计
 }
 
 

@@ -5,6 +5,8 @@ export const api = axios.create({
   timeout: 30_000,
 });
 
+export type DesignMode = "MULTI_TOPIC" | "SINGLE_TOPIC_STRONG" | "COLLECTION_2SKU";
+
 export type RunSummary = {
   id: string;
   fixture_id: string | null;
@@ -12,6 +14,7 @@ export type RunSummary = {
   style_no: string;
   gender_ratio: string;
   num_designs_k: number;
+  design_mode?: DesignMode;
   status: "running" | "succeeded" | "failed";
   audit_passed: boolean | null;
   audit_rounds: number | null;
@@ -101,12 +104,22 @@ export const diffPrompts = (nodeId: string, v1: string, v2: string) =>
 
 // ----- Fixtures ----- //
 export const listFixtures = () => api.get("/fixtures").then((r) => r.data);
+export const getFixture = (id: string) => api.get(`/fixtures/${id}`).then((r) => r.data);
 export const createFixture = (payload: Record<string, unknown>) =>
   api.post("/fixtures", payload).then((r) => r.data);
+export const deleteFixture = (id: string) =>
+  api.delete(`/fixtures/${id}`).then((r) => r.data);
 
 // ----- Compare runs ----- //
 export const compareRuns = (runIds: string[]) =>
   api.get(`/runs/compare/multi`, { params: { ids: runIds.join(",") } }).then((r) => r.data);
+
+// ----- v5 CONVERGE（强单主题 / Collection） ----- //
+export const getRunFinal = (runId: string) =>
+  api.get(`/runs/${runId}/final`).then((r) => r.data);
+// 手动触发：把成套 run 已生成的整套 look 同步到 Fitting Room（幂等）
+export const syncCollectionLooks = (runId: string) =>
+  api.post<{ ok: boolean; created: number }>(`/tasks/sync-collection-looks/${runId}`).then((r) => r.data);
 
 // ----- M6/M7 生图任务 ----- //
 export type TaskSummary = {
@@ -126,14 +139,160 @@ export type TaskSummary = {
 };
 
 export const listTasks = () => api.get<TaskSummary[]>("/tasks").then((r) => r.data);
+// 跨任务全局图片墙
+export const listAllImages = (limit = 200) =>
+  api.get("/tasks/all-images", { params: { limit } }).then((r) => r.data);
+
+// ----- Fitting Room ----- //
+export type Look = {
+  id: string;
+  name: string;
+  top_kind: "image" | "text" | null;
+  top_image_id: string | null;
+  top_text: string | null;
+  bottom_kind: "image" | "text" | null;
+  bottom_image_id: string | null;
+  bottom_text: string | null;
+  tags: string[];
+  shooting_slot_kind: "upload" | "template" | null;
+  shooting_slot_url: string | null;
+  shooting_slot_meta: Record<string, any> | null;
+  created_at: string;
+  updated_at: string;
+};
+export type LookCreateItem = {
+  name?: string | null;
+  top_kind?: "image" | "text" | null;
+  top_image_id?: string | null;
+  top_text?: string | null;
+  bottom_kind?: "image" | "text" | null;
+  bottom_image_id?: string | null;
+  bottom_text?: string | null;
+  tags?: string[];
+};
+
+export const listLooks = () => api.get<Look[]>("/looks").then((r) => r.data);
+export const createLooksBulk = (looks: LookCreateItem[]) =>
+  api.post<Look[]>("/looks", { looks }).then((r) => r.data);
+export const updateLook = (id: string, payload: Partial<LookCreateItem>) =>
+  api.patch<Look>(`/looks/${id}`, payload).then((r) => r.data);
+export const deleteLook = (id: string) =>
+  api.delete(`/looks/${id}`).then((r) => r.data);
+export const duplicateLook = (id: string) =>
+  api.post<Look>(`/looks/${id}/duplicate`).then((r) => r.data);
+// 触发浏览器下载 JSON
+export const exportLooksJson = () => {
+  window.open("/api/v1/looks/export", "_blank");
+};
+
+// 批量导出选中的 look 图片到用户桌面
+export type LooksExportResponse = {
+  ok: boolean;
+  output_dir: string;
+  csv_path: string | null;
+  exported_count: number;
+  exported: Array<{ look_id: string; look_name: string; files: string[]; partial_skips: string[] }>;
+  skipped: Array<{ look_id: string; look_name?: string; reason: string }>;
+};
+export const exportLooksToDesktop = (lookIds: string[]) =>
+  api
+    .post<LooksExportResponse>("/looks/export-to-desktop", { look_ids: lookIds })
+    .then((r) => r.data);
+
+// 上装 / 下装归类
+export const listImageCategories = () =>
+  api.get<Record<string, "top" | "bottom">>("/image-categories").then((r) => r.data);
+export const bulkUpsertImageCategories = (
+  items: { image_id: string; category: "top" | "bottom"; source?: string }[],
+) => api.post("/image-categories", { items }).then((r) => r.data);
+
+// ----- 印花图案库（v6 图库输入源）----- //
+export type PatternLibraryGroup = {
+  folder_name: string;
+  parent_topic: string;
+  sub_topic: string;
+  image_count: number;
+  cover_url: string;
+  images: Array<{ filename: string; url: string }>;
+};
+export type PatternLibraryData = {
+  root: string;
+  available: boolean;
+  error?: string;
+  categories: string[];
+  groups: PatternLibraryGroup[];
+  meta: { group_count: number; image_count: number };
+};
+export const listPatternLibrary = () =>
+  api.get<PatternLibraryData>("/pattern-library").then((r) => r.data);
+export const getPatternLibraryStats = () =>
+  api.get("/pattern-library/stats").then((r) => r.data);
+
+// ----- 视觉模板库 & 拍摄槽位 ----- //
+export type TemplatesData = {
+  meta: { categories: string[]; group_count?: number; image_count?: number; generated_at?: string };
+  tag_dict: { schemas: Record<string, any> };
+  groups: Array<{
+    category: string;
+    name: string;
+    model_name?: string;
+    model_type?: string;
+    scene_desc?: string;
+    group_tags?: Record<string, string[]>;
+    images: Array<{ file?: string; filename?: string; tags?: Record<string, string> }>;
+  }>;
+  error?: string;
+  root?: string;
+};
+export type TemplatesStats = {
+  available: boolean;
+  root?: string;
+  categories?: string[];
+  group_count?: number;
+  image_count?: number;
+  generated_at?: string;
+};
+export const getTemplatesData = () => api.get<TemplatesData>("/templates").then((r) => r.data);
+export const getTemplatesStats = () => api.get<TemplatesStats>("/templates/stats").then((r) => r.data);
+
+export const uploadShootingSlot = (lookId: string, file: File, remark?: string) => {
+  const form = new FormData();
+  form.append("file", file);
+  if (remark) form.append("remark", remark);
+  return api
+    .post(`/looks/${lookId}/shooting-slot/upload`, form, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((r) => r.data);
+};
+
+export const setShootingSlotTemplate = (
+  lookId: string,
+  payload: {
+    category: string;
+    group_name: string;
+    image_filename: string;
+    group_tags?: Record<string, any>;
+    image_tags?: Record<string, any>;
+    remark?: string;
+  },
+) =>
+  api
+    .post(`/looks/${lookId}/shooting-slot/set-template`, payload)
+    .then((r) => r.data);
+
+export const clearShootingSlot = (lookId: string) =>
+  api.delete(`/looks/${lookId}/shooting-slot`).then((r) => r.data);
 export const getTask = (id: string) => api.get(`/tasks/${id}`).then((r) => r.data);
 export const createTask = (payload: {
   source_step2_run_id: string;
   selected_plan_ids: string[];
   concurrency?: number;
 }) => api.post<TaskSummary>("/tasks", payload).then((r) => r.data);
-export const regenerateTask = (id: string, payload: { plan_ids: string[]; concurrency?: number }) =>
-  api.post<TaskSummary>(`/tasks/${id}/regenerate`, payload).then((r) => r.data);
+export const regenerateTask = (
+  id: string,
+  payload: { plan_ids: string[]; concurrency?: number; keep_original?: boolean },
+) => api.post<TaskSummary>(`/tasks/${id}/regenerate`, payload).then((r) => r.data);
 export const deleteTask = (id: string) => api.delete(`/tasks/${id}`).then((r) => r.data);
 export const prepTaskFromRun = (runId: string) =>
   api.get(`/tasks/prep/from-run/${runId}`).then((r) => r.data);
@@ -163,7 +322,60 @@ export const listStyles = () => api.get("/styles").then((r) => r.data);
 export const getStyle = (styleNo: string) =>
   api.get(`/styles/${encodeURIComponent(styleNo)}`).then((r) => r.data);
 
+// 上传 PDF + 名字 → 启动趋势导入 job
+export const uploadTrend = (name: string, pdf: File) => {
+  const form = new FormData();
+  form.append("name", name);
+  form.append("pdf", pdf);
+  return api.post("/trends/upload", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  }).then((r) => r.data);
+};
+
+// 订阅趋势导入 job SSE 进度
+export const subscribeTrendImport = (
+  jobId: string,
+  onEvent: (event: string, payload: any) => void,
+): EventSource => {
+  const es = new EventSource(`/api/v1/trends/jobs/${jobId}/stream`);
+  ["trend_started", "trend_progress", "trend_succeeded", "trend_failed"].forEach((name) => {
+    es.addEventListener(name, (e: MessageEvent) => {
+      try {
+        onEvent(name, JSON.parse(e.data));
+      } catch (err) {
+        console.warn("SSE parse error", err);
+      }
+    });
+  });
+  return es;
+};
+// ----- 账单（token / 成本统计） ----- //
+export const getBillingSummary = (params?: { date_from?: string; date_to?: string }) =>
+  api.get("/billing/summary", { params }).then((r) => r.data);
+export const getBillingDelivery = (mainRunId: string) =>
+  api.get(`/billing/delivery/${mainRunId}`).then((r) => r.data);
+
 // ----- Settings ----- //
 export const getSettings = () => api.get("/settings").then((r) => r.data);
 export const updateSettings = (payload: Record<string, unknown>) =>
   api.patch("/settings", payload).then((r) => r.data);
+
+// ----- 款级缓存管理（2.1 款式分析 / 2.2 颜色识别 跨 run 复用） ----- //
+export type StyleCacheStats = {
+  root: string;
+  total_bytes: number;
+  styles: Array<{
+    style_no: string;
+    analysis_count: number;
+    color_count: number;
+    total_bytes: number;
+    updated_at: string;
+  }>;
+};
+export const getStyleCacheStats = () =>
+  api.get<StyleCacheStats>("/settings/style-cache").then((r) => r.data);
+export const clearStyleCache = (styleNo?: string) =>
+  (styleNo
+    ? api.delete(`/settings/style-cache/${encodeURIComponent(styleNo)}`)
+    : api.delete("/settings/style-cache")
+  ).then((r) => r.data);

@@ -20,8 +20,8 @@ function extractBizNumber(nodeId: string): string {
   return parts.join(".");
 }
 
-// 5 个有 prompt 的节点
-const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.7"]);
+// 有 prompt 的节点：v4 的 6 个 + v5 CONVERGE 图（强单主题/成套）的 3 个，都能编辑 prompt + fork
+const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"]);
 
 export default function NodeDetailPanel() {
   const { currentRunId, selectedNodeId } = useRunStore();
@@ -114,8 +114,9 @@ export default function NodeDetailPanel() {
   // 只对 LLM 类型 + 有对应 prompt 文件的节点显示「编辑 prompt」按钮
   const canEditPrompt = data.node_type === "llm" && PROMPT_NODES.has(bizId);
 
-  // 取 fork 入口的业务编号——loop 节点取前缀（"2.2.loop" → "2.2"）
-  const forkBizId = bizId.split(".").slice(0, 2).join(".");
+  // 取 fork 入口的业务编号——loop 节点去掉 .loop 后缀（"2.2.loop" → "2.2"、"2.5L.loop" → "2.5L"）
+  // 注意不能按段截断："2.4.5" 是合法三段节点 id
+  const forkBizId = bizId.endsWith(".loop") ? bizId.slice(0, -".loop".length) : bizId;
   const canFork = PROMPT_NODES.has(forkBizId) && !!currentRunId;
 
   const handleFork = () => {
@@ -152,10 +153,22 @@ export default function NodeDetailPanel() {
 
   // 判断是否是颜色识别节点（2.2 单色或 2.2.loop 都可能）+ 是否失败/可重识别
   const isColorNode = bizId === "2.2" && data.node_type === "llm";
-  const colorCode = data.input?.色号代码 || data.output?.色号代码;
-  const colorName = data.input?.营销色名 || data.output?.营销色名;
-  const isRecognitionFailed = data.output?._recognition_failed === true;
+  // 从 node.name 兜底提取色号 + 色名（形如 "单色设计·DSC09156·淡卡其" / "颜色识别·DSC09156·淡卡其"）
+  // 老 run 的 cache input 可能缺 营销色名 字段，这是 fallback 路径
+  const nameParts = (data.name || "").split("·");
+  const codeFromName = nameParts.length >= 3 ? nameParts[1] : null;
+  const nameFromName = nameParts.length >= 3 ? nameParts.slice(2).join("·") : null;
+  const colorCode = data.input?.色号代码 || data.output?.色号代码 || codeFromName;
+  const colorName = data.input?.营销色名 || data.output?.营销色名 || nameFromName;
+  const isRecognitionFailed = data.output?._recognition_failed === true || (isColorNode && data.status === "failed");
   const canRecognize = isColorNode && !!colorCode && !!colorName;
+
+  // 2.5 单色设计节点（v4 起从 2.4 改到 2.5）+ 失败状态 → 显示「重新生成此色号方案」按钮
+  // 失败两种信号：(a) trace status === "failed"（硬失败：LLM 抛异常）
+  //                (b) output._design_failed === true（向后兼容软失败标记）
+  const isDesignNode = bizId === "2.5" && data.node_type === "llm";
+  const isDesignFailed = isDesignNode && (data.status === "failed" || data.output?._design_failed === true);
+  const canRedesign = isDesignNode && !!colorCode && !!colorName;
 
   return (
     <div style={{ padding: 16 }}>
@@ -186,6 +199,35 @@ export default function NodeDetailPanel() {
             onClick={() => recognizeMut.mutate({ color_code: colorCode, color_name: colorName })}
           >
             ↻ 重新识别此色号{isRecognitionFailed ? "（修复失败）" : ""}
+          </Button>
+        )}
+        {canRedesign && isDesignFailed && (
+          <Button
+            type="primary"
+            danger
+            loading={redesignMut.isPending}
+            onClick={() => Modal.confirm({
+              title: `↻ 重新生成 ${colorCode}-${colorName} 的设计方案`,
+              icon: null,
+              content: (
+                <div style={{ fontSize: 12 }}>
+                  <p>仅对这一个色号重跑 2.4 LLM 调用，<strong>其他色号方案保持不变</strong>。</p>
+                  <p style={{ color: "#999", marginTop: 8 }}>
+                    会复用原 prompt（含累积状态、最新识别色信息），不会重新跑审计。
+                  </p>
+                  <p style={{ marginTop: 12, padding: 8, background: "#fff1f0", borderRadius: 4, fontSize: 11 }}>
+                    ⚠ 烧 token + 等约 30-60 秒；如果上游 2.2 颜色识别有问题，请先点「↻ 重新识别」修复。
+                  </p>
+                </div>
+              ),
+              okText: "重新生成",
+              okType: "primary",
+              cancelText: "取消",
+              width: 480,
+              onOk: () => redesignMut.mutate({ color_code: colorCode, color_name: colorName }),
+            })}
+          >
+            ↻ 重新生成此色号方案（修复失败）
           </Button>
         )}
         <Button disabled={!canFork} onClick={handleFork}>

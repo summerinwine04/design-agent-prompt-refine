@@ -6,12 +6,14 @@ import { useState } from "react";
 import { listTasks, deleteTask, type TaskSummary } from "../api/client";
 
 
-// 4 个核心节点 → 简洁中文标签
+// v4 节点 → 简洁中文标签
 const NODE_LABELS: Record<string, string> = {
   "2.1": "款式分析",
   "2.2": "颜色识别",
   "2.3": "性别规划",
-  "2.4": "单色设计",
+  "2.4": "主题选择",
+  "2.5": "单色设计",
+  "2.8": "局部重设计",
 };
 
 // 从 "01_style_analysis.md@v3" 抽出 "v3"；@current → "current"
@@ -90,6 +92,9 @@ export default function TasksListPage() {
           {selected.size > 0 && (
             <Button size="small" onClick={() => setSelected(new Set())}>清空选择</Button>
           )}
+          <Link to="/tasks/gallery">
+            <Button type="primary" ghost>🖼️ 查看全部生图</Button>
+          </Link>
           <Link to="/"><Button>← 工作台</Button></Link>
         </Space>
       </Space>
@@ -196,7 +201,8 @@ function TaskRow({
         {/* 源 step2 run 的 prompt 版本（2.1 / 2.2 / 2.3 / 2.4）*/}
         <Space size={4} wrap style={{ fontSize: 11 }}>
           <span style={{ color: "#999" }}>Step2 Prompt 版本:</span>
-          {["2.1", "2.2", "2.3", "2.4"].map((nodeId) => {
+          {/* 任务列表行宽有限，只展示 v4 最关心的 4 个 prompt 调试点 */}
+          {["2.1", "2.4", "2.5", "2.8"].map((nodeId) => {
             const label = task.source_prompt_bundle?.[nodeId];
             const version = extractVersion(label);
             const isNonDefault = label && version !== "current";

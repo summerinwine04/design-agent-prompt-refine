@@ -38,7 +38,7 @@ if _ENV_FILE.exists():
             os.environ.setdefault(_k.strip(), _v.strip())
 
 _SCRIPT_DIR = Path(__file__).parent
-PROMPT_MD_PATH = _SCRIPT_DIR.parent / "prompt" / "step1_trend_parse.md"
+PROMPT_MD_PATH = _SCRIPT_DIR.parent / "prompts" / "step1_trend_parse.md"
 DEFAULT_MODEL = "gpt-5.5"
 
 
@@ -225,14 +225,18 @@ def main():
     logger.info(f"开始上传趋势图（共 {len(trend_images)} 张）…")
 
     try:
-        for img_path in trend_images:
+        # 进度行格式：backend trend importer 会监听 stdout 解析
+        total = len(trend_images)
+        for i, img_path in enumerate(trend_images):
             logger.info(f"上传: {img_path.name} ({img_path.stat().st_size / 1024:.1f} KB)")
             with open(img_path, "rb") as fh:
                 file_obj = client.files.create(file=fh, purpose="vision")
             uploaded_file_ids.append(file_obj.id)
             logger.info(f"  → file_id: {file_obj.id}")
+            print(f"[PROGRESS_LINE] stage=upload current={i + 1} total={total}", flush=True)
 
         logger.info(f"全部上传完成，共 {len(uploaded_file_ids)} 个 file_id")
+        print(f"[PROGRESS_LINE] stage=upload_done total={total}", flush=True)
 
         # 组装 Responses API 请求
         responses_url = "https://api.openai.com/v1/responses"
@@ -260,6 +264,8 @@ def main():
         last_log_time = datetime.now()
         final_response = None
 
+        last_progress_chars = 0
+        print(f"[PROGRESS_LINE] stage=llm_start", flush=True)
         with client.responses.stream(  # type: ignore[attr-defined]
             model=args.model,
             instructions=system_prompt,
@@ -275,6 +281,10 @@ def main():
                 if (now - last_log_time).seconds >= 30:
                     logger.info(f"  推理中… 已接收 {char_count} 字符")
                     last_log_time = now
+                # 每接收 ~1000 字符发一次进度行，让 backend SSE 能转推给前端
+                if char_count - last_progress_chars >= 1000:
+                    print(f"[PROGRESS_LINE] stage=llm_streaming chars={char_count}", flush=True)
+                    last_progress_chars = char_count
             try:
                 final_response = stream.get_final_response()  # type: ignore[attr-defined]
             except RuntimeError as e:
@@ -325,6 +335,7 @@ def main():
 
         json_file.write_text(json.dumps(output, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info(f"JSON 已保存: {json_file}")
+        print(f"[PROGRESS_LINE] stage=done json={json_file}", flush=True)
 
     except Exception as exc:
         logger.error(f"调用失败: {exc}", exc_info=True)

@@ -12,10 +12,35 @@ DB 只用于"列表/筛选/外键关联"等元数据查询的快路径，**不�
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "data" / "metadata.db"
+_ENV_FILE = Path(__file__).parent.parent / ".env"
+
+
+def get_openai_api_key() -> str | None:
+    """
+    每次从 .env 实时读取最新 OPENAI_API_KEY，绕过 os.environ 启动时缓存的问题。
+
+    设计动机：旧实现 runs/tasks 都用 `os.environ.get("OPENAI_API_KEY")`，但
+    uvicorn 启动时一次性加载 .env 进 os.environ，之后用户在「设置」tab 改 key
+    虽然写到了 .env，进程内 os.environ 不会更新，导致真跑仍用老 key。
+
+    优先级：.env 文件 > os.environ > None
+    """
+    if _ENV_FILE.is_file():
+        try:
+            for line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and line.startswith("OPENAI_API_KEY="):
+                    v = line.partition("=")[2].strip()
+                    if v:
+                        return v
+        except Exception:
+            pass
+    return os.environ.get("OPENAI_API_KEY")
 
 
 SCHEMA = """
@@ -107,6 +132,38 @@ CREATE TABLE IF NOT EXISTS generation_tasks (
 
 CREATE INDEX IF NOT EXISTS idx_tasks_created ON generation_tasks(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_source  ON generation_tasks(source_step2_run_id);
+
+-- Fitting Room：跨任务的 look 组套管理
+CREATE TABLE IF NOT EXISTS looks (
+    id              TEXT PRIMARY KEY,       -- look-{timestamp}-{hex6}
+    name            TEXT NOT NULL,          -- 用户命名或自动 "look-NN"
+    top_kind        TEXT,                   -- "image" | "text" | NULL（空侧）
+    top_image_id    TEXT,                   -- gallery item ID：{task_id}:{plan_id}
+    top_text        TEXT,                   -- 缺失侧补文本描述
+    bottom_kind     TEXT,
+    bottom_image_id TEXT,
+    bottom_text     TEXT,
+    tags            TEXT,                   -- JSON array
+    -- 拍摄配置槽位（Fitting Room Try-on 集成，v1.1 新增；旧记录保持 NULL 不受影响）
+    shooting_slot_kind TEXT,                -- "upload" | "template" | NULL
+    shooting_slot_url  TEXT,                -- 静态 URL（上传或模板库路径）
+    shooting_slot_meta TEXT,                -- JSON 快照：类目 / 图组 / 标签 / 备注
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 兼容旧 DB：给已存在的 looks 表补三个字段（SQLite 不支持 IF NOT EXISTS on ADD COLUMN，
+-- 用 PRAGMA 检查——放到 init_db 的 Python 代码里做，比 SQL 稳）
+
+CREATE INDEX IF NOT EXISTS idx_looks_updated ON looks(updated_at DESC);
+
+-- 用户对每张 gallery 图的上/下装归类持久化（用户手动切换后不丢）
+CREATE TABLE IF NOT EXISTS image_categories (
+    image_id     TEXT PRIMARY KEY,          -- {task_id}:{plan_id}
+    category     TEXT NOT NULL,             -- "top" | "bottom"
+    source       TEXT,                      -- "auto"（款号启发式）| "manual"
+    updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -120,10 +177,44 @@ def get_conn() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """启动时建表。"""
+    """启动时建表 + 增量迁移（给旧 DB 补新字段）"""
     conn = get_conn()
     try:
         conn.executescript(SCHEMA)
+        # Migration: 若旧 DB 的 looks 表没有 shooting_slot_* 列，补上
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(looks)").fetchall()}
+        for col_name, col_def in [
+            ("shooting_slot_kind", "TEXT"),
+            ("shooting_slot_url",  "TEXT"),
+            ("shooting_slot_meta", "TEXT"),
+        ]:
+            if col_name not in cols:
+                conn.execute(f"ALTER TABLE looks ADD COLUMN {col_name} {col_def}")
+
+        # Migration v5（激进合并方案）：fixtures 表补 design_mode/styles/looks/color_strategy。
+        # 老记录 design_mode 默认 MULTI_TOPIC（Mode A），继续可读可跑。
+        # Migration v6：加 input_source 与图库输入相关字段（Phase 1 图库输入落地）。
+        fcols = {r["name"] for r in conn.execute("PRAGMA table_info(fixtures)").fetchall()}
+        for col_name, col_def in [
+            ("design_mode",                    "TEXT DEFAULT 'MULTI_TOPIC'"),
+            ("styles",                         "TEXT"),   # JSON: [{role, ref_image_path, color_folder, selected_colors}]
+            ("looks",                          "TEXT"),   # JSON: [{name, members:{role:color_code}}]
+            ("color_strategy",                 "TEXT"),   # shared_pool | per_style_pool | NULL
+            # v6 图库输入
+            ("input_source",                   "TEXT DEFAULT 'trend_report'"),  # trend_report | pattern_library
+            ("pattern_library_path",           "TEXT"),   # 相对 PATTERN_LIBRARY_ROOT 的文件夹名
+            ("pattern_library_selected_files", "TEXT"),   # JSON 数组：用户预筛的 1-3 张图文件名
+        ]:
+            if col_name not in fcols:
+                conn.execute(f"ALTER TABLE fixtures ADD COLUMN {col_name} {col_def}")
+
+        # Migration v5：runs 表补 design_mode
+        # v6：runs 也补 input_source（分析用；blueprint 详情落在 final JSON 里）
+        rcols = {r["name"] for r in conn.execute("PRAGMA table_info(runs)").fetchall()}
+        if "design_mode" not in rcols:
+            conn.execute("ALTER TABLE runs ADD COLUMN design_mode TEXT DEFAULT 'MULTI_TOPIC'")
+        if "input_source" not in rcols:
+            conn.execute("ALTER TABLE runs ADD COLUMN input_source TEXT DEFAULT 'trend_report'")
         conn.commit()
     finally:
         conn.close()
@@ -145,6 +236,7 @@ def insert_run(
     fixture_id: str | None = None,
     parent_run_id: str | None = None,
     fork_from_node: str | None = None,
+    design_mode: str = "MULTI_TOPIC",
 ) -> None:
     """新建 run，status='running'。"""
     import json as _json
@@ -153,12 +245,12 @@ def insert_run(
         conn.execute(
             """INSERT INTO runs (id, fixture_id, trend_name, style_no, gender_ratio,
                                   num_designs_k, prompt_bundle, status,
-                                  run_dir, parent_run_id, fork_from_node)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+                                  run_dir, parent_run_id, fork_from_node, design_mode)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)""",
             (
                 run_id, fixture_id, trend_name, style_no, gender_ratio,
                 num_designs_k, _json.dumps(prompt_bundle, ensure_ascii=False),
-                run_dir, parent_run_id, fork_from_node,
+                run_dir, parent_run_id, fork_from_node, design_mode,
             ),
         )
         conn.commit()
@@ -224,6 +316,30 @@ def list_runs(*, limit: int = 100, fixture_id: str | None = None) -> list[dict]:
                 "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def list_recent_successful_runs(
+    *, trend_name: str, style_no: str, limit: int = 5,
+) -> list[dict]:
+    """
+    历史避重专用：按创建时间倒序取同款+同趋势最近 N 轮 succeeded run。
+    仅返回 status ∈ (succeeded, succeeded_with_audit_warnings) 且 final_json_path 非空的记录。
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT * FROM runs
+               WHERE trend_name = ?
+                 AND style_no = ?
+                 AND status IN ('succeeded', 'succeeded_with_audit_warnings')
+                 AND final_json_path IS NOT NULL
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (trend_name, style_no, limit),
+        ).fetchall()
         return [dict(r) for r in rows]
     finally:
         conn.close()
@@ -354,5 +470,169 @@ def delete_generation_task(task_id: str) -> None:
     try:
         conn.execute("DELETE FROM generation_tasks WHERE id = ?", (task_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Fitting Room：looks & image_categories CRUD
+# ============================================================================
+
+def list_looks(*, limit: int = 500) -> list[dict]:
+    """按创建时间倒序（最近入 Fitting Room 的排最前）。
+
+    注意不要按 updated_at 排：编辑文本/tags 都会 bump updated_at，
+    导致卡片在页面上跳来跳去——展示顺序应该稳定。
+    """
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM looks ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_look(look_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT * FROM looks WHERE id = ?", (look_id,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def insert_look(
+    *,
+    id: str,
+    name: str,
+    top_kind: str | None = None,
+    top_image_id: str | None = None,
+    top_text: str | None = None,
+    bottom_kind: str | None = None,
+    bottom_image_id: str | None = None,
+    bottom_text: str | None = None,
+    tags: list[str] | None = None,
+    shooting_slot_kind: str | None = None,
+    shooting_slot_url: str | None = None,
+    shooting_slot_meta: dict | str | None = None,
+) -> None:
+    import json as _json
+    # meta 允许 dict 传入，会自动 JSON 化
+    if isinstance(shooting_slot_meta, dict):
+        shooting_slot_meta = _json.dumps(shooting_slot_meta, ensure_ascii=False)
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO looks
+               (id, name, top_kind, top_image_id, top_text,
+                bottom_kind, bottom_image_id, bottom_text, tags,
+                shooting_slot_kind, shooting_slot_url, shooting_slot_meta)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                id, name, top_kind, top_image_id, top_text,
+                bottom_kind, bottom_image_id, bottom_text,
+                _json.dumps(tags or [], ensure_ascii=False),
+                shooting_slot_kind, shooting_slot_url, shooting_slot_meta,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_look(look_id: str, **fields) -> None:
+    """部分字段更新——None 表示不动。tags/shooting_slot_meta 传 list/dict 会自动 JSON 化。"""
+    import json as _json
+    allowed = {"name", "top_kind", "top_image_id", "top_text",
+               "bottom_kind", "bottom_image_id", "bottom_text", "tags",
+               "shooting_slot_kind", "shooting_slot_url", "shooting_slot_meta"}
+    updates: list[str] = []
+    values: list = []
+    for k, v in fields.items():
+        if k not in allowed or v is None:
+            continue
+        if k == "tags" and not isinstance(v, str):
+            v = _json.dumps(v, ensure_ascii=False)
+        if k == "shooting_slot_meta" and isinstance(v, dict):
+            v = _json.dumps(v, ensure_ascii=False)
+        updates.append(f"{k} = ?")
+        values.append(v)
+    if not updates:
+        return
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(look_id)
+    conn = get_conn()
+    try:
+        conn.execute(
+            f"UPDATE looks SET {', '.join(updates)} WHERE id = ?",
+            tuple(values),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_look(look_id: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM looks WHERE id = ?", (look_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_image_categories() -> dict[str, str]:
+    """返回 image_id → category 映射，前端一次性拿全批用。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT image_id, category FROM image_categories").fetchall()
+        return {r["image_id"]: r["category"] for r in rows}
+    finally:
+        conn.close()
+
+
+def upsert_image_category(image_id: str, category: str, source: str = "manual") -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO image_categories (image_id, category, source, updated_at)
+               VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(image_id) DO UPDATE SET
+                 category = excluded.category,
+                 source = excluded.source,
+                 updated_at = CURRENT_TIMESTAMP""",
+            (image_id, category, source),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def upsert_image_categories_bulk(items: list[dict]) -> int:
+    """批量 upsert，items = [{image_id, category, source}, ...]。返回处理条数。"""
+    conn = get_conn()
+    try:
+        n = 0
+        for it in items:
+            iid = it.get("image_id")
+            cat = it.get("category")
+            src = it.get("source", "manual")
+            if not iid or cat not in ("top", "bottom"):
+                continue
+            conn.execute(
+                """INSERT INTO image_categories (image_id, category, source, updated_at)
+                   VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(image_id) DO UPDATE SET
+                     category = excluded.category,
+                     source = excluded.source,
+                     updated_at = CURRENT_TIMESTAMP""",
+                (iid, cat, src),
+            )
+            n += 1
+        conn.commit()
+        return n
     finally:
         conn.close()

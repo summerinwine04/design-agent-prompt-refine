@@ -1,0 +1,10 @@
+# 用户预筛选的核心参考图（1-3 张）
+# 每行一张图的**绝对路径**，# 开头 = 注释
+# 修改此文件后重跑 run_spike.py 即可
+#
+# 当前用的是"山系户外童装花型TOP热榜-植物脉络方向"下的 3 张
+# 想换其他方向或换图，改下面路径即可
+
+C:\Users\zgj\Documents\Claude\Projects\summer\ai-supply\印花图案库\山系户外童装花型TOP热榜-植物脉络方向\山系户外童装花型TOP热榜-植物脉络方向-叶片拓印绿满印.png
+C:\Users\zgj\Documents\Claude\Projects\summer\ai-supply\印花图案库\山系户外童装花型TOP热榜-植物脉络方向\山系户外童装花型TOP热榜-植物脉络方向-年轮测绘图军绿.png
+C:\Users\zgj\Documents\Claude\Projects\summer\ai-supply\印花图案库\山系户外童装花型TOP热榜-植物脉络方向\山系户外童装花型TOP热榜-植物脉络方向-植物拓印灰绿满印.png

@@ -1,4 +1,4 @@
-import { Card, Tag, Space, Spin, Empty, Button, Modal, Collapse, Progress, Alert, message, Tooltip } from "antd";
+import { Card, Tag, Space, Spin, Empty, Button, Modal, Collapse, Progress, Alert, message, Tooltip, Segmented } from "antd";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useParams, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
@@ -6,11 +6,14 @@ import { useEffect, useState } from "react";
 import { getTask, subscribeTask, regenerateTask } from "../api/client";
 
 // 与 TasksListPage 保持一致的 prompt 版本展示规则
+// v4 节点
 const PROMPT_NODE_LABELS: Record<string, string> = {
   "2.1": "款式分析",
   "2.2": "颜色识别",
   "2.3": "性别规划",
-  "2.4": "单色设计",
+  "2.4": "主题选择",
+  "2.5": "单色设计",
+  "2.8": "局部重设计",
 };
 function extractPromptVersion(label: string | undefined): string {
   if (!label) return "?";
@@ -36,6 +39,12 @@ export default function TaskDetailPage() {
   const { taskId } = useParams<{ taskId: string }>();
   const queryClient = useQueryClient();
   const [imageModalPlanId, setImageModalPlanId] = useState<string | null>(null);
+  // Step 3 视图模式：卡片视图（含色号 + 方案文字 + 重生按钮）/ 平铺视图（纯图片墙）
+  const [step3ViewMode, setStep3ViewMode] = useState<"card" | "tiled">("card");
+
+  // SSE 实时结果：单图完成事件直接 patch 进来，不等 DB 整批写完
+  // 这样首张图 30-60s 后就立刻可见，不必等整批 N×30s
+  const [liveResults, setLiveResults] = useState<Map<string, any>>(new Map());
 
   const { data, isLoading } = useQuery({
     queryKey: ["task", taskId],
@@ -44,12 +53,37 @@ export default function TaskDetailPage() {
     refetchInterval: (q) => (q.state.data as any)?.status === "running" ? 2000 : false,
   });
 
-  // 订阅 SSE：每收到事件就 refetch 一下 task
+  // 订阅 SSE：单图事件 patch liveResults + 其他事件 refetch
   useEffect(() => {
     if (!taskId) return;
     if (data && data.status !== "running" && data.status !== "pending") return;
-    const es = subscribeTask(taskId, (eventType, _payload) => {
-      // 简单粗暴：每个事件触发 refetch
+    const es = subscribeTask(taskId, (eventType, payload: any) => {
+      // 单图级事件：直接更新 liveResults，让该 plan 的状态/图立即出现
+      if (eventType === "plan_started" || eventType === "plan_succeeded" || eventType === "plan_failed") {
+        const planId = payload?.plan_id;
+        if (planId) {
+          setLiveResults((prev) => {
+            const next = new Map(prev);
+            next.set(planId, {
+              plan_id: planId,
+              color_code: payload.color_code,
+              color_name: payload.color_name,
+              status:
+                payload.status ??
+                (eventType === "plan_started"
+                  ? "running"
+                  : eventType === "plan_succeeded"
+                  ? "succeeded"
+                  : "failed"),
+              image_url: payload.image_url,
+              elapsed_ms: payload.elapsed_ms,
+              error: payload.error,
+            });
+            return next;
+          });
+        }
+      }
+      // 任务级事件：刷一下 DB（拿 cost / 总耗时 / image_prompt_used 等完整字段）
       queryClient.invalidateQueries({ queryKey: ["task", taskId] });
       if (eventType === "task_finished") {
         es.close();
@@ -57,6 +91,13 @@ export default function TaskDetailPage() {
     });
     return () => es.close();
   }, [taskId, data?.status, queryClient]);
+
+  // 任务一旦不在跑（completed/failed/partial）→ DB 已写全 → 清空 liveResults 避免覆盖
+  useEffect(() => {
+    if (data && data.status !== "running" && data.status !== "pending" && liveResults.size > 0) {
+      setLiveResults(new Map());
+    }
+  }, [data?.status, liveResults.size]);
 
   const regenMut = useMutation({
     mutationFn: (planIds: string[]) => regenerateTask(taskId!, { plan_ids: planIds, concurrency: 2 }),
@@ -69,13 +110,28 @@ export default function TaskDetailPage() {
 
   if (isLoading || !data) return <Spin style={{ margin: 24 }} />;
 
-  const percent = data.progress_total > 0 ? Math.round((data.progress_done / data.progress_total) * 100) : 0;
-  const failedPlans = (data.results || []).filter((r: any) => r.status === "failed");
+  // 合并 server.results + 本地 liveResults（后者实时、前者完整）
+  // 渲染时统一用 mergedResults，让首张图 30s 后就可见
+  const mergedResultsMap = new Map<string, any>();
+  for (const r of data.results || []) {
+    mergedResultsMap.set(r.plan_id, r);
+  }
+  for (const [k, v] of liveResults.entries()) {
+    // 如果本地已有更新状态（succeeded/failed/running），覆盖 server data
+    const existing = mergedResultsMap.get(k);
+    mergedResultsMap.set(k, { ...(existing || {}), ...v });
+  }
+  const mergedResults = Array.from(mergedResultsMap.values());
+
+  // 用 mergedResults 算实时进度 — 让顶部进度条/失败数也跟着每张图刷新
+  const liveDone = mergedResults.filter((r) => r.status === "succeeded" || r.status === "failed").length;
+  const displayDone = Math.max(liveDone, data.progress_done || 0);
+  const percent = data.progress_total > 0 ? Math.round((displayDone / data.progress_total) * 100) : 0;
+  const failedPlans = mergedResults.filter((r) => r.status === "failed");
   const planLookup = new Map<string, any>((data.snapshot_plans || []).map((p: any) => [p.方案编号, p]));
-  const resultLookup = new Map<string, any>((data.results || []).map((r: any) => [r.plan_id, r]));
 
   const selectedPlanForModal = imageModalPlanId ? planLookup.get(imageModalPlanId) : null;
-  const selectedResultForModal = imageModalPlanId ? resultLookup.get(imageModalPlanId) : null;
+  const selectedResultForModal = imageModalPlanId ? mergedResultsMap.get(imageModalPlanId) : null;
 
   return (
     <div style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
@@ -86,6 +142,9 @@ export default function TaskDetailPage() {
           <Tag color={STATUS_COLOR[data.status] || "default"}>{data.status}</Tag>
         </Space>
         <Space>
+          <Link to="/tasks/gallery">
+            <Button type="primary" ghost>🖼️ 查看全部生图</Button>
+          </Link>
           <Link to="/"><Button>工作台</Button></Link>
         </Space>
       </Space>
@@ -95,7 +154,7 @@ export default function TaskDetailPage() {
         <Space wrap size="middle">
           <span><strong>{data.trend_name}</strong> × <strong>{data.style_no}</strong></span>
           <span>·</span>
-          <span>{data.progress_done} / {data.progress_total} 张</span>
+          <span>{displayDone} / {data.progress_total} 张</span>
           {data.total_cost_usd != null && (
             <>
               <span>·</span>
@@ -115,7 +174,8 @@ export default function TaskDetailPage() {
         {/* Step2 prompt 版本 — 紫色 Tag 表示非默认版本 */}
         <Space size={4} wrap style={{ marginTop: 8, fontSize: 11 }}>
           <span style={{ color: "#999" }}>Step2 Prompt 版本:</span>
-          {["2.1", "2.2", "2.3", "2.4"].map((nodeId) => {
+          {/* 详情页 banner 展示 v4 的 6 个节点完整版本组 */}
+          {["2.1", "2.2", "2.3", "2.4", "2.5", "2.8"].map((nodeId) => {
             const label = data.source_prompt_bundle?.[nodeId];
             const version = extractPromptVersion(label);
             const isNonDefault = label && version !== "current";
@@ -178,15 +238,40 @@ export default function TaskDetailPage() {
           },
           {
             key: "step3",
-            label: <Step3Label results={data.results} total={data.progress_total} />,
+            label: <Step3Label results={mergedResults} total={data.progress_total} />,
             children: (
-              <Step3Panel
-                snapshotPlans={data.snapshot_plans}
-                results={data.results || []}
-                onClickImage={(planId) => setImageModalPlanId(planId)}
-                onRegenerate={(planId) => regenMut.mutate([planId])}
-                isRegenerating={regenMut.isPending}
-              />
+              <>
+                <Space style={{ marginBottom: 12 }}>
+                  <span style={{ fontSize: 12, color: "#666" }}>视图：</span>
+                  <Segmented
+                    size="small"
+                    value={step3ViewMode}
+                    onChange={(v) => setStep3ViewMode(v as "card" | "tiled")}
+                    options={[
+                      { label: "卡片", value: "card" },
+                      { label: "平铺", value: "tiled" },
+                    ]}
+                  />
+                  <span style={{ fontSize: 11, color: "#999" }}>
+                    {step3ViewMode === "card" ? "含色号 / 方案信息 / 重生按钮" : "纯图片墙，点图放大"}
+                  </span>
+                </Space>
+                {step3ViewMode === "card" ? (
+                  <Step3Panel
+                    snapshotPlans={data.snapshot_plans}
+                    results={mergedResults}
+                    onClickImage={(planId) => setImageModalPlanId(planId)}
+                    onRegenerate={(planId) => regenMut.mutate([planId])}
+                    isRegenerating={regenMut.isPending}
+                  />
+                ) : (
+                  <Step3TiledPanel
+                    snapshotPlans={data.snapshot_plans}
+                    results={mergedResults}
+                    onClickImage={(planId) => setImageModalPlanId(planId)}
+                  />
+                )}
+              </>
             ),
           },
         ]}
@@ -391,6 +476,135 @@ function Step3Panel({
           </Card>
         );
       })}
+    </div>
+  );
+}
+
+
+// ----- Step 3 平铺视图（纯图片墙） ----- //
+function Step3TiledPanel({
+  snapshotPlans,
+  results,
+  onClickImage,
+}: {
+  snapshotPlans: any[];
+  results: any[];
+  onClickImage: (planId: string) => void;
+}) {
+  const resultLookup = new Map(results.map((r) => [r.plan_id, r]));
+
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fill, minmax(160px, 1fr))",
+        gap: 4,
+      }}
+    >
+      {snapshotPlans.map((plan: any) => {
+        const result = resultLookup.get(plan.方案编号);
+        const status = result?.status ?? "pending";
+        const isSucceeded = status === "succeeded" && result?.image_url;
+        return (
+          <div
+            key={plan.方案编号}
+            onClick={() => isSucceeded && onClickImage(plan.方案编号)}
+            style={{
+              width: "100%",
+              aspectRatio: "1/1",
+              background: "#fafafa",
+              overflow: "hidden",
+              cursor: isSucceeded ? "pointer" : "default",
+              position: "relative",
+              borderRadius: 2,
+              border: status === "failed" ? "1px solid #ff4d4f" : "1px solid #eee",
+              transition: "transform 0.15s, box-shadow 0.15s",
+            }}
+            onMouseEnter={(e) => {
+              if (isSucceeded) {
+                (e.currentTarget as HTMLDivElement).style.transform = "scale(1.02)";
+                (e.currentTarget as HTMLDivElement).style.boxShadow =
+                  "0 4px 12px rgba(0,0,0,0.12)";
+                (e.currentTarget as HTMLDivElement).style.zIndex = "1";
+              }
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLDivElement).style.transform = "";
+              (e.currentTarget as HTMLDivElement).style.boxShadow = "";
+              (e.currentTarget as HTMLDivElement).style.zIndex = "";
+            }}
+          >
+            {isSucceeded ? (
+              <img
+                src={result.image_url}
+                alt={plan.方案编号}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
+            ) : status === "running" ? (
+              <div
+                style={{
+                  width: "100%", height: "100%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  flexDirection: "column", gap: 6,
+                }}
+              >
+                <Spin size="small" />
+                <div style={{ fontSize: 10, color: "#999" }}>生成中</div>
+              </div>
+            ) : status === "failed" ? (
+              <div
+                style={{
+                  width: "100%", height: "100%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  flexDirection: "column", gap: 4,
+                  color: "#ff4d4f",
+                }}
+                title={result?.error?.slice(0, 200)}
+              >
+                <div style={{ fontSize: 20 }}>✗</div>
+                <div style={{ fontSize: 10 }}>失败</div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  width: "100%", height: "100%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "#bbb",
+                }}
+              >
+                <div style={{ fontSize: 20 }}>⏳</div>
+              </div>
+            )}
+            {/* 悬浮显示色号 + 子主题，hover 时才出 */}
+            {isSucceeded && (
+              <div
+                style={{
+                  position: "absolute",
+                  bottom: 0, left: 0, right: 0,
+                  padding: "4px 6px",
+                  background: "linear-gradient(transparent, rgba(0,0,0,0.6))",
+                  color: "#fff",
+                  fontSize: 10,
+                  pointerEvents: "none",
+                  opacity: 0,
+                  transition: "opacity 0.15s",
+                }}
+                className="tiled-overlay"
+              >
+                <div style={{ fontWeight: 600 }}>
+                  {plan._色号代码 || plan.色号代码} · {plan._营销色名 || plan.营销色名}
+                </div>
+                <div style={{ fontSize: 9, opacity: 0.85 }}>
+                  {plan.选用子主题编号} {plan.选用子主题名称}
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <style>{`
+        div[style*="cursor: pointer"]:hover .tiled-overlay { opacity: 1 !important; }
+      `}</style>
     </div>
   );
 }

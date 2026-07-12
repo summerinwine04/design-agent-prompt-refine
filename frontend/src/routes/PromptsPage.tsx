@@ -14,12 +14,18 @@ import { listPrompts, getPrompt, listTasks, listRuns } from "../api/client";
  *   - 顶部：一键预设（最新跑的 task / run / 全部 current）
  */
 
+// v4：6 节点（旧 04_single_color_design / 04b 留作 v3 历史快照）
 const PROMPT_NODES = [
   { id: "2.1", name: "款式分析", file: "01_style_analysis.md" },
   { id: "2.2", name: "颜色识别", file: "02_color_recognition.md" },
   { id: "2.3", name: "性别规划", file: "03_gender_planning.md" },
-  { id: "2.4", name: "单色设计", file: "04_single_color_design.md" },
-  { id: "2.7", name: "局部重设计", file: "04b_redesign_constraint.md" },
+  { id: "2.4", name: "主题选择", file: "04_topic_selection.md" },
+  { id: "2.5", name: "单色设计", file: "05_single_color_design.md" },
+  { id: "2.8", name: "局部重设计", file: "05b_redesign_constraint.md" },
+  // v5 CONVERGE 图（Mode B / Mode C / 图库输入源）专用节点
+  { id: "2.4s", name: "单主题选择", file: "04s_single_topic_selection.md" },
+  { id: "2.4.5", name: "母图案 Blueprint", file: "045_pattern_blueprint.md" },
+  { id: "2.5L", name: "Look 联合设计", file: "05L_look_variant_design.md" },
 ];
 
 const DEFAULT_BUNDLE = Object.fromEntries(PROMPT_NODES.map((n) => [n.id, "current"]));

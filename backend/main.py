@@ -34,12 +34,16 @@ sys.path.insert(0, str(ROOT / "tool"))
 
 from backend.db import init_db
 from backend.routers import (
+    billing,
     fixtures,
+    looks,
+    pattern_library as pattern_library_router,
     prompts,
     runs,
     settings,
     styles,
     tasks,
+    templates as templates_router,
     trends,
 )
 
@@ -84,6 +88,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 公网访问守卫：本地请求零影响；隧道请求（ngrok/cloudflared）需密码 + 只读白名单
+from backend.public_access import PublicAccessMiddleware  # noqa: E402
+app.add_middleware(PublicAccessMiddleware)
+
 
 # ----- 路由 ----- #
 app.include_router(runs.router,     prefix="/api/v1/runs",     tags=["runs"])
@@ -93,6 +101,12 @@ app.include_router(trends.router,   prefix="/api/v1/trends",   tags=["trends"])
 app.include_router(styles.router,   prefix="/api/v1/styles",   tags=["styles"])
 app.include_router(settings.router, prefix="/api/v1/settings", tags=["settings"])
 app.include_router(tasks.router,    prefix="/api/v1/tasks",    tags=["tasks"])    # M6/M7 生图任务
+app.include_router(looks.router,        prefix="/api/v1/looks",             tags=["looks"])                # Fitting Room look 组套
+app.include_router(looks.img_cat_router, prefix="/api/v1/image-categories", tags=["image-categories"])   # 上/下装归类持久化
+app.include_router(templates_router.router, prefix="/api/v1/templates", tags=["templates"])              # 视觉模板库读取
+app.include_router(pattern_library_router.router, prefix="/api/v1/pattern-library", tags=["pattern-library"])  # 印花图案库读取（Collection 图库输入源）
+app.include_router(billing.router,  prefix="/api/v1/billing",  tags=["billing"])                          # 账单：token/成本统计
+app.include_router(templates_router.look_slot_router, prefix="/api/v1/looks/{look_id}/shooting-slot", tags=["shooting-slot"])  # look 拍摄槽位
 
 
 # ----- 静态资源挂载 ----- #
@@ -128,6 +142,43 @@ if _trends_dir.is_dir():
         name="trends-static",
     )
 
+# 视觉模板库图（Fitting Room Try-on 集成）—— TEMPLATES_ROOT 环境变量优先，兜底 ../视觉模板库
+import os as _os
+_tpl_env = _os.environ.get("TEMPLATES_ROOT")
+_tpl_dir = Path(_tpl_env).resolve() / "templates" if _tpl_env else (ROOT.parent / "视觉模板库" / "templates")
+if _tpl_dir.is_dir():
+    # 顺手确保 user_uploads 子目录存在（用户上传的拍摄参考图落这里）
+    (_tpl_dir / "user_uploads").mkdir(parents=True, exist_ok=True)
+    app.mount(
+        "/static/templates",
+        StaticFiles(directory=str(_tpl_dir), check_dir=False),
+        name="templates-static",
+    )
+    print(f"[startup] 视觉模板库 mounted at /static/templates → {_tpl_dir}", flush=True)
+else:
+    print(
+        f"[startup] ⚠ 视觉模板库 not found at {_tpl_dir}. "
+        f"Set TEMPLATES_ROOT in .env to enable Fitting Room shooting slot.",
+        flush=True,
+    )
+
+# 印花图案库图（Collection 图库输入源）—— PATTERN_LIBRARY_ROOT 环境变量优先，兜底 ../ai-supply/印花图案库
+_pl_env = _os.environ.get("PATTERN_LIBRARY_ROOT")
+_pl_dir = Path(_pl_env).resolve() if _pl_env else (ROOT.parent / "ai-supply" / "印花图案库")
+if _pl_dir.is_dir():
+    app.mount(
+        "/static/pattern-library",
+        StaticFiles(directory=str(_pl_dir), check_dir=False),
+        name="pattern-library-static",
+    )
+    print(f"[startup] 印花图案库 mounted at /static/pattern-library → {_pl_dir}", flush=True)
+else:
+    print(
+        f"[startup] ⚠ 印花图案库 not found at {_pl_dir}. "
+        f"Set PATTERN_LIBRARY_ROOT in .env to enable Collection 图库输入.",
+        flush=True,
+    )
+
 
 @app.on_event("startup")
 async def on_startup() -> None:
@@ -139,16 +190,43 @@ async def on_startup() -> None:
     event_bus.set_main_loop(asyncio.get_running_loop())
 
 
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+# ----- 前端构建产物挂载（单端口公网访问用） ----- #
+# 每次请求动态检查 frontend/dist（npm run build 产物）——
+# 不依赖启动时序：backend 先启动、后 build 也能立即生效，无需重启。
+from fastapi.responses import FileResponse, JSONResponse  # noqa: E402
+
+_DIST = ROOT / "frontend" / "dist"
+
+
 @app.get("/")
-async def root():
+async def root_or_spa():
+    idx = _DIST / "index.html"
+    if idx.is_file():
+        return FileResponse(idx)
     return {
         "name": "prompt-refine-agent",
         "version": "0.1.0",
         "docs": "/docs",
-        "openapi": "/openapi.json",
+        "hint": "前端未构建：运行 `cd frontend && npm run build` 后本页即变为应用首页",
     }
 
 
-@app.get("/healthz")
-async def healthz():
-    return {"status": "ok"}
+# 注册在所有 API 路由之后：已知路由优先匹配，剩余路径按 SPA 回退
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str):
+    if ".." not in full_path:
+        f = _DIST / full_path
+        if full_path and f.is_file():
+            return FileResponse(f)
+    idx = _DIST / "index.html"
+    if idx.is_file():
+        return FileResponse(idx)
+    return JSONResponse(
+        {"detail": "前端未构建：请先运行 `cd frontend && npm run build`"},
+        status_code=404,
+    )

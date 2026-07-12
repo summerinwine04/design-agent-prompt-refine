@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 
 from backend.db import (
     get_conn,
+    get_openai_api_key,
     get_run as db_get_run,
     insert_run as db_insert_run,
     list_runs as db_list_runs,
@@ -120,26 +121,86 @@ async def create_run(req: RunCreateRequest):
     from orchestrator.orchestrator import Step2Config, Step2Fixture, Step2Run
     from orchestrator.prompts import PromptBundle
 
-    color_items = _parse_color_images(Path(fixture["color_folder"]))
-    if not color_items:
-        raise HTTPException(400, f"no valid color images in {fixture['color_folder']}")
+    # v6 图库输入源支持：无 trend_json_path 时兜底空 JSON
+    input_source = fixture.get("input_source") or "trend_report"
+    pattern_library_folder = fixture.get("pattern_library_path") or ""
+    pattern_library_selected_files = fixture.get("pattern_library_selected_files") or []
 
-    # 趋势 JSON
-    trend_json = json.loads(Path(fixture["trend_json_path"]).read_text(encoding="utf-8"))
-    trend_name = Path(fixture["trend_json_path"]).stem
+    if input_source == "pattern_library":
+        # 图库输入源：SKIP 2.4s，trend_json 用 {} 兜底，trend_name 用文件夹名
+        trend_json = {}
+        trend_name = pattern_library_folder or "pattern_library"
+    else:
+        # 趋势报告输入源：正常读取
+        if not fixture.get("trend_json_path"):
+            raise HTTPException(400, "trend_report 输入源要求 trend_json_path 非空")
+        trend_json = json.loads(Path(fixture["trend_json_path"]).read_text(encoding="utf-8"))
+        trend_name = Path(fixture["trend_json_path"]).stem
 
-    step2_fixture = Step2Fixture(
-        trend_name=trend_name,
-        style_no=Path(fixture["ref_image_path"]).stem,
-        ref_image_path=Path(fixture["ref_image_path"]),
-        color_items=color_items,
-        trend_json=trend_json,
-        gender_ratio=fixture["gender_ratio"],
-        num_designs_k=fixture["num_designs_k"],
-    )
+    design_mode = fixture.get("design_mode") or "MULTI_TOPIC"
+
+    # v6 前置校验：图库输入 + MULTI_TOPIC = 非法组合（前端已经限制，backend 兜底防御）
+    if input_source == "pattern_library" and design_mode == "MULTI_TOPIC":
+        raise HTTPException(
+            400,
+            "图库输入源必须搭配 SINGLE_TOPIC_STRONG 或 COLLECTION_2SKU（Mode A 只能吃趋势报告）",
+        )
+
+    # v6 组装核心参考图绝对路径列表（供 orchestrator 传给 LLM 视觉输入）
+    core_ref_image_paths: list[str] = []
+    if input_source == "pattern_library":
+        from backend.routers.pattern_library import get_pattern_library_root
+        pl_root = get_pattern_library_root()
+        for fn in pattern_library_selected_files:
+            p = pl_root / pattern_library_folder / fn
+            if not p.is_file():
+                raise HTTPException(400, f"图库文件不存在：{p}")
+            core_ref_image_paths.append(str(p.resolve()))
+        if not core_ref_image_paths:
+            raise HTTPException(400, "图库输入源要求至少 1 张核心参考图")
+        if len(core_ref_image_paths) > 3:
+            raise HTTPException(400, "核心参考图最多 3 张（Phase 1 硬上限）")
+
+    if design_mode in ("SINGLE_TOPIC_STRONG", "COLLECTION_2SKU"):
+        # v5 CONVERGE：装配 styles + looks（Mode B 自动包装；Mode C 用户预选）
+        styles, looks, primary_style_no, combined_style_no = _assemble_converge_inputs(fixture)
+        primary = styles[0]
+        step2_fixture = Step2Fixture(
+            trend_name=trend_name,
+            style_no=combined_style_no,
+            ref_image_path=Path(primary["ref_image_path"]),
+            color_items=primary["color_items"],
+            trend_json=trend_json,
+            gender_ratio=fixture["gender_ratio"],
+            num_designs_k=fixture["num_designs_k"],
+            design_mode=design_mode,
+            styles=styles,
+            looks=looks,
+        )
+    else:
+        color_items = _parse_color_images(Path(fixture["color_folder"]))
+        if fixture.get("selected_colors"):
+            # 兼容两种引用：文件名（新前端，唯一）或色号 code（老夹具；同码多色会一起匹配）
+            wanted = set(fixture["selected_colors"])
+            color_items = [
+                c for c in color_items
+                if c["code"] in wanted or Path(c["path"]).name in wanted
+            ] or color_items
+        if not color_items:
+            raise HTTPException(400, f"no valid color images in {fixture['color_folder']}")
+
+        step2_fixture = Step2Fixture(
+            trend_name=trend_name,
+            style_no=Path(fixture["ref_image_path"]).stem,
+            ref_image_path=Path(fixture["ref_image_path"]),
+            color_items=color_items,
+            trend_json=trend_json,
+            gender_ratio=fixture["gender_ratio"],
+            num_designs_k=fixture["num_designs_k"],
+        )
 
     # API key
-    api_key = os.environ.get("OPENAI_API_KEY", "dryrun-placeholder")
+    api_key = get_openai_api_key() or "dryrun-placeholder"
     if not req.dry_run and api_key == "dryrun-placeholder":
         raise HTTPException(400, "OPENAI_API_KEY 未设置且非 dry-run 模式")
 
@@ -159,7 +220,67 @@ async def create_run(req: RunCreateRequest):
         max_audit_rounds=req.max_audit_rounds,
         a_tier_quota=req.a_tier_quota,
         dry_run=req.dry_run,
+        reuse_style_analysis=req.reuse_style_analysis,
+        # v6 图库输入源透传到 orchestrator
+        input_source=input_source,
+        pattern_library_folder=pattern_library_folder,
+        core_ref_image_paths=core_ref_image_paths,
     )
+
+    # 历史避重：查同款+同趋势最近 5 轮 succeeded 的 final JSON，抽出选过的主题 + 同色号的方案摘要
+    if req.diversity_avoid_history:
+        try:
+            from backend.db import list_recent_successful_runs
+            hist_rows = list_recent_successful_runs(
+                trend_name=trend_name,
+                style_no=step2_fixture.style_no,
+                limit=5,
+            )
+            _seen_topic_ids: set[str] = set()
+            _seen_topic_names: set[str] = set()
+            recent_color_designs: dict[str, list[dict]] = {}
+            for row in hist_rows:
+                fj_path = row.get("final_json_path")
+                if not fj_path:
+                    continue
+                try:
+                    fj = json.loads(Path(fj_path).read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                top = fj.get("step2_改款方案") or {}
+                # 2.4 主题选择
+                topic_sel = top.get("主题选择") or {}
+                for t in topic_sel.get("选用主题列表") or []:
+                    tid = (t.get("子主题编号") or "").strip()
+                    tname = (t.get("子主题名称") or "").strip()
+                    # 用 (id, name) pair 组合去重，避免仅编号相同名字不同（历史 prompt 迭代）
+                    key = (tid, tname)
+                    if key in _seen_topic_ids:
+                        continue
+                    _seen_topic_ids.add(key)
+                    if tid:
+                        config.avoid_topic_ids.append(tid)
+                    else:
+                        config.avoid_topic_ids.append("")
+                    config.avoid_topic_names.append(tname)
+                # 2.5 单色方案（按色号代码归组）
+                for color_row in top.get("色号方案列表") or []:
+                    code = (color_row.get("色号代码") or "").strip()
+                    if not code:
+                        continue
+                    for dp in color_row.get("设计方案") or []:
+                        recent_color_designs.setdefault(code, []).append({
+                            "子主题名称": dp.get("选用子主题名称") or dp.get("子主题名称"),
+                            "图案关键词": dp.get("图案关键词"),
+                            "方案说明": dp.get("方案说明") or "",
+                        })
+            config.recent_color_designs = recent_color_designs
+        except Exception as _e:
+            # 查历史失败不阻断真跑；打日志由 uvicorn console 看
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "diversity avoid_history lookup failed: %s", _e,
+            )
 
     output_root = ROOT / "runs"
     output_root.mkdir(parents=True, exist_ok=True)
@@ -188,6 +309,7 @@ async def create_run(req: RunCreateRequest):
         prompt_bundle=bundle.to_meta_dict(),
         run_dir=str(run.run_dir),
         fixture_id=req.fixture_id,
+        design_mode=design_mode,
     )
 
     # 6. 后台异步执行——orchestrator 内部用 sync OpenAI SDK 会阻塞 event loop，
@@ -273,6 +395,11 @@ async def fork_run(run_id: str, req: RunForkRequest):
     src_fixture_dict = src_run_started.get("fixture") or {}
     src_bundle = src_run_started.get("prompt_bundle") or {}
 
+    # v5：CONVERGE run 的 fork —— 从 meta 里的 styles/looks 重建 fixture。
+    # look_id 由成员 uid 哈希生成（确定性），重建后与源 run 的 cache slug 完全对齐，
+    # 未被 force_miss 的节点全部走缓存。
+    src_mode = src_fixture_dict.get("design_mode") or "MULTI_TOPIC"
+
     ref_image_path = Path(_resolve_path_for_fork(src_fixture_dict, "ref_image"))
     # trend_json_path：优先 meta；缺失则按 ai-supply 默认布局兜底
     if "trend_json_path" in src_fixture_dict:
@@ -295,10 +422,6 @@ async def fork_run(run_id: str, req: RunForkRequest):
     color_codes = src_fixture_dict.get("color_codes") or []
     gender_ratio = src_fixture_dict.get("gender_ratio") or "男女比接近1:1"
     num_designs_k = int(src_fixture_dict.get("K") or src_fixture_dict.get("num_designs_k") or 1)
-    # color_folder 优先 meta，缺失就从 ref_image 推
-    color_folder = Path(src_fixture_dict.get("color_folder") or (ref_image_path.parent / ref_image_path.stem))
-    if not color_folder.is_dir():
-        raise HTTPException(400, f"色号文件夹不存在：{color_folder}")
 
     # 合并 bundle：source @v 给底；req.prompt_overrides 覆盖
     # src_bundle 格式 = "01_style_analysis.md@current"，需要还原成 versions dict
@@ -316,25 +439,70 @@ async def fork_run(run_id: str, req: RunForkRequest):
     from orchestrator.orchestrator import Step2Config, Step2Fixture, Step2Run
     from orchestrator.prompts import PromptBundle
 
-    color_items = _parse_color_images(color_folder)
-    if not color_items:
-        raise HTTPException(400, f"色号文件夹无有效图片：{color_folder}")
-
     trend_json = json.loads(trend_json_path.read_text(encoding="utf-8"))
     trend_name = trend_json_path.stem
-    style_no = ref_image_path.stem
 
-    step2_fixture = Step2Fixture(
-        trend_name=trend_name,
-        style_no=style_no,
-        ref_image_path=ref_image_path,
-        color_items=color_items,
-        trend_json=trend_json,
-        gender_ratio=gender_ratio,
-        num_designs_k=num_designs_k,
-    )
+    if src_mode != "MULTI_TOPIC":
+        # ---- CONVERGE fork：从 meta 的 styles/looks 重建 ----
+        meta_styles = src_fixture_dict.get("styles") or []
+        meta_looks = src_fixture_dict.get("looks") or []
+        if not meta_styles or not meta_looks:
+            raise HTTPException(400, "源 run 的 fixture meta 缺少 styles/looks（旧版本 run），无法 fork")
+        styles_spec = []
+        for s in meta_styles:
+            rp = Path(s["ref_image_path"])
+            if not rp.is_file():
+                raise HTTPException(400, f"款位 {s.get('role')} 的款图不存在：{rp}")
+            styles_spec.append({
+                "role": s["role"],
+                "ref_image_path": str(rp),
+                "color_folder": str(rp.parent / rp.stem),
+                "selected_colors": None,
+            })
+        conv_fixture = {
+            "design_mode": src_mode,
+            "styles": styles_spec,
+            # meta looks 的 members 已是 uid（文件名），_resolve_member 直接命中；
+            # look_id 由 members 哈希重新生成，与源 run 一致 → cache slug 对齐
+            "looks": [{"name": lk.get("name"), "members": lk.get("members")} for lk in meta_looks],
+        }
+        styles, looks, primary_style_no, combined_style_no = _assemble_converge_inputs(conv_fixture)
+        primary = styles[0]
+        style_no = combined_style_no
+        step2_fixture = Step2Fixture(
+            trend_name=trend_name,
+            style_no=combined_style_no,
+            ref_image_path=Path(primary["ref_image_path"]),
+            color_items=primary["color_items"],
+            trend_json=trend_json,
+            gender_ratio=gender_ratio,
+            num_designs_k=num_designs_k,
+            design_mode=src_mode,
+            styles=styles,
+            looks=looks,
+        )
+    else:
+        # ---- DIVERGE fork（原逻辑） ----
+        # color_folder 优先 meta，缺失就从 ref_image 推
+        color_folder = Path(src_fixture_dict.get("color_folder") or (ref_image_path.parent / ref_image_path.stem))
+        if not color_folder.is_dir():
+            raise HTTPException(400, f"色号文件夹不存在：{color_folder}")
+        color_items = _parse_color_images(color_folder)
+        if not color_items:
+            raise HTTPException(400, f"色号文件夹无有效图片：{color_folder}")
+        style_no = ref_image_path.stem
 
-    api_key = os.environ.get("OPENAI_API_KEY", "dryrun-placeholder")
+        step2_fixture = Step2Fixture(
+            trend_name=trend_name,
+            style_no=style_no,
+            ref_image_path=ref_image_path,
+            color_items=color_items,
+            trend_json=trend_json,
+            gender_ratio=gender_ratio,
+            num_designs_k=num_designs_k,
+        )
+
+    api_key = get_openai_api_key() or "dryrun-placeholder"
     if api_key == "dryrun-placeholder":
         raise HTTPException(400, "fork 需要 OPENAI_API_KEY")
 
@@ -346,7 +514,9 @@ async def fork_run(run_id: str, req: RunForkRequest):
     output_root.mkdir(parents=True, exist_ok=True)
 
     # 解析 from_node_id → 业务编号集合，加入 explicit_force_miss
-    # 支持 3 种格式："2.2" / "node_2.2" / "2_2_005" / "2_2_loop_002"
+    # 支持格式："2.2" / "node_2.2" / "2_2_005" / "2_2_loop_002"
+    #           v5："2_4s_018" → 2.4s / "2_4_5_019" → 2.4.5 / "2_5L_loop_020" → 2.5L
+    _VALID_BIZ_IDS = {"2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"}
     explicit_force_miss = set()
     fnid = (req.from_node_id or "").strip()
     if fnid.startswith("node_"):
@@ -363,13 +533,15 @@ async def fork_run(run_id: str, req: RunForkRequest):
                 biz_parts.append(p)
             if biz_parts:
                 biz_id = ".".join(biz_parts)
-                # 形如 2.2.loop —— 取前两段作为业务编号
-                if "." in biz_id:
-                    # 保留前 2 段："2.2" / "2.4" 等
+                # 去掉 loop 后缀（"2.2.loop" → "2.2"、"2.5L.loop" → "2.5L"）
+                if biz_id.endswith(".loop"):
+                    biz_id = biz_id[: -len(".loop")]
+                # 兼容旧规则的多段截断，但 2.4.5 是合法三段 id 不能截
+                if biz_id not in _VALID_BIZ_IDS and "." in biz_id:
                     biz_id = ".".join(biz_id.split(".")[:2])
-                if biz_id in {"2.1", "2.2", "2.3", "2.4", "2.7"}:
+                if biz_id in _VALID_BIZ_IDS:
                     explicit_force_miss.add(biz_id)
-        elif fnid in {"2.1", "2.2", "2.3", "2.4", "2.7"}:
+        elif fnid in _VALID_BIZ_IDS:
             explicit_force_miss.add(fnid)
 
     new_run = Step2Run(
@@ -394,6 +566,7 @@ async def fork_run(run_id: str, req: RunForkRequest):
         run_dir=str(new_run.run_dir),
         parent_run_id=run_id,
         fork_from_node=req.from_node_id,
+        design_mode=src_mode,
     )
 
     # 后台跑（线程池）
@@ -507,7 +680,7 @@ async def recognize_color(run_id: str, req: RecognizeColorRequest):
     bundle = PromptBundle(prompt_root=ROOT / "prompts" / "step2", versions=versions)
     system_prompt, _ = bundle.load("2.2")
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(400, "OPENAI_API_KEY 未设置")
     llm = LLMClient(api_key=api_key)
@@ -545,6 +718,16 @@ async def recognize_color(run_id: str, req: RecognizeColorRequest):
         json.dumps(cached_payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    # 同步失效款级缓存：该色号图的旧识别结果不能再被后续 run 复用
+    # （不直接写新结果——key 需要底色/模型上下文，让下个 run 重新识别一次并回填更稳）
+    try:
+        from orchestrator.style_cache import StyleCache
+        StyleCache(ROOT / "runs" / "_style_cache").invalidate_color(
+            row["style_no"], color_img,
+        )
+    except Exception:
+        pass
 
     # 翻盘 trace.jsonl 节点状态：追加一条 node_completed 事件，覆盖原 node_failed
     # 前端 TraceTreePanel 按顺序处理事件，最后的 status 以最新的为准
@@ -806,7 +989,7 @@ async def redesign_single_color(run_id: str, req: RedesignSingleColorRequest):
     bundle = PromptBundle(prompt_root=ROOT / "prompts" / "step2", versions=versions)
     system_prompt, _ = bundle.load("2.4")
 
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(400, "OPENAI_API_KEY 未设置")
     llm = LLMClient(api_key=api_key)
@@ -1092,6 +1275,22 @@ async def compare_runs_metrics(ids: str):
     return {"rows": rows, "errors": errors}
 
 
+@router.get("/{run_id}/final")
+async def get_final_json(run_id: str):
+    """返回 run 的 final_output.json（Collection View / 前端消费）。"""
+    row = db_get_run(run_id)
+    if not row:
+        raise HTTPException(404, "run not found")
+    candidates = [
+        Path(row["run_dir"]) / "final_output.json",
+        Path(row["final_json_path"]) if row.get("final_json_path") else None,
+    ]
+    final_path = next((p for p in candidates if p and p.is_file()), None)
+    if final_path is None:
+        raise HTTPException(404, "final JSON 不存在（run 可能未完成）")
+    return json.loads(final_path.read_text(encoding="utf-8"))
+
+
 @router.get("/{run_id}/logs")
 async def get_logs(run_id: str):
     """返回原始 trace.jsonl 全文。"""
@@ -1115,7 +1314,7 @@ async def get_logs(run_id: str):
 # ============================================================================
 
 def _resolve_fixture(req: RunCreateRequest) -> dict:
-    """从 fixture_id 或 inline 参数解析出 fixture dict。"""
+    """从 fixture_id 或 inline 参数解析出 fixture dict（含 v5/v6 字段）。"""
     if req.fixture_id:
         conn = get_conn()
         try:
@@ -1124,6 +1323,7 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
             ).fetchone()
             if not row:
                 raise HTTPException(404, f"fixture {req.fixture_id} not found")
+            keys = row.keys()
             return {
                 "trend_json_path": row["trend_json_path"],
                 "ref_image_path": row["ref_image_path"],
@@ -1131,15 +1331,58 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
                 "gender_ratio": row["gender_ratio"],
                 "num_designs_k": row["num_designs_k"],
                 "selected_colors": json.loads(row["selected_colors"]) if row["selected_colors"] else None,
+                # v5：请求显式传的优先，其次 fixture 存的
+                "design_mode": (
+                    req.design_mode if req.design_mode != "MULTI_TOPIC"
+                    else (row["design_mode"] if "design_mode" in keys and row["design_mode"] else "MULTI_TOPIC")
+                ),
+                "styles": (
+                    [s.model_dump() for s in req.styles] if req.styles
+                    else (json.loads(row["styles"]) if "styles" in keys and row["styles"] else None)
+                ),
+                "looks": (
+                    [l.model_dump() for l in req.looks] if req.looks
+                    else (json.loads(row["looks"]) if "looks" in keys and row["looks"] else None)
+                ),
+                # v6 图库输入源：请求显式传的优先，其次 fixture 存的
+                "input_source": (
+                    req.input_source if req.input_source and req.input_source != "trend_report"
+                    else (row["input_source"] if "input_source" in keys and row["input_source"] else "trend_report")
+                ),
+                "pattern_library_path": (
+                    req.pattern_library_path or (row["pattern_library_path"] if "pattern_library_path" in keys else None)
+                ),
+                "pattern_library_selected_files": (
+                    req.pattern_library_selected_files if req.pattern_library_selected_files
+                    else (
+                        json.loads(row["pattern_library_selected_files"])
+                        if "pattern_library_selected_files" in keys and row["pattern_library_selected_files"]
+                        else None
+                    )
+                ),
             }
         finally:
             conn.close()
     # inline 模式
-    if not (req.trend_json_path and req.ref_image_path and req.color_folder):
-        raise HTTPException(
-            400,
-            "需要提供 fixture_id 或 (trend_json_path + ref_image_path + color_folder)",
-        )
+    input_source = req.input_source or "trend_report"
+    # 图库输入源：trend_json_path 可缺；否则必填 3 字段
+    if input_source == "pattern_library":
+        if not (req.pattern_library_path and req.pattern_library_selected_files):
+            raise HTTPException(
+                400,
+                "图库输入源要求 pattern_library_path + pattern_library_selected_files 都非空",
+            )
+        if not (req.ref_image_path and req.color_folder):
+            raise HTTPException(
+                400,
+                "图库输入源也需要提供 ref_image_path + color_folder（款图 + 色号池）",
+            )
+    else:
+        if not (req.trend_json_path and req.ref_image_path and req.color_folder):
+            raise HTTPException(
+                400,
+                "需要提供 fixture_id 或 (trend_json_path + ref_image_path + color_folder)",
+            )
     return {
         "trend_json_path": req.trend_json_path,
         "ref_image_path": req.ref_image_path,
@@ -1147,7 +1390,152 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
         "gender_ratio": req.gender_ratio,
         "num_designs_k": req.num_designs_k,
         "selected_colors": req.selected_colors,
+        "design_mode": req.design_mode,
+        "styles": [s.model_dump() for s in req.styles] if req.styles else None,
+        "looks": [l.model_dump() for l in req.looks] if req.looks else None,
+        "input_source": input_source,
+        "pattern_library_path": req.pattern_library_path,
+        "pattern_library_selected_files": req.pattern_library_selected_files,
     }
+
+
+def _look_id_for(members: dict) -> str:
+    """look_id 由成员内容哈希生成——确定性、可作为 2.5L cache key。"""
+    import hashlib
+    sig = "|".join(f"{r}:{c}" for r, c in sorted(members.items()))
+    return "LK-" + hashlib.md5(sig.encode("utf-8")).hexdigest()[:8]
+
+
+def _assemble_converge_inputs(fixture: dict) -> tuple[list[dict], list[dict], str, str]:
+    """
+    CONVERGE 模式（Mode B/C）：装配 styles + looks。
+
+    返回 (styles, looks, primary_style_no, combined_style_no)：
+      - styles: [{role, style_no, ref_image_path, color_items}]，色号池已过滤为仅 look 用到的
+      - looks:  [{look_id, name, members}]
+      - combined_style_no: Mode B = 款号本身；Mode C = "top款号+bottom款号"（历史避重按这个 key 匹配）
+    """
+    design_mode = fixture["design_mode"]
+    styles_spec = fixture.get("styles") or []
+
+    # Mode B 未显式传 styles → 用主字段包装单款 main
+    if not styles_spec:
+        if design_mode == "COLLECTION_2SKU":
+            raise HTTPException(400, "COLLECTION_2SKU 模式必须提供 styles（top + bottom 两个款位）")
+        styles_spec = [{
+            "role": "main",
+            "ref_image_path": fixture["ref_image_path"],
+            "color_folder": fixture["color_folder"],
+            "selected_colors": fixture.get("selected_colors"),
+        }]
+
+    if design_mode == "COLLECTION_2SKU":
+        roles = [s["role"] for s in styles_spec]
+        if sorted(roles) != ["bottom", "top"]:
+            raise HTTPException(400, f"COLLECTION_2SKU 模式 styles 的 roles 必须是 top + bottom，实得 {roles}")
+
+    styles: list[dict] = []
+    for s in styles_spec:
+        folder = Path(s["color_folder"])
+        items = _parse_color_images(folder)
+        if s.get("selected_colors"):
+            # 兼容文件名（唯一）或色号 code 两种引用
+            wanted = set(s["selected_colors"])
+            items = [
+                c for c in items
+                if c["code"] in wanted or Path(c["path"]).name in wanted
+            ]
+        # 唯一标识 uid = 文件名。色号 code 可能重复（同一照片编号对应多个颜色，
+        # 如 DSC09174(浅天蓝).jpg + DSC09174(牛油果绿).jpg），code 仅作展示，
+        # look 成员引用一律用 uid。按 (code, name) 去掉真重复（同码同名多文件保留第一张）。
+        seen_pairs: set[tuple] = set()
+        deduped: list[dict] = []
+        for c in items:
+            pair = (c["code"], c["name"])
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            c["uid"] = Path(c["path"]).name
+            deduped.append(c)
+        items = deduped
+        if not items:
+            raise HTTPException(400, f"款位 {s['role']} 的色号文件夹无有效图片：{folder}")
+        styles.append({
+            "role": s["role"],
+            "style_no": Path(s["ref_image_path"]).stem,
+            "ref_image_path": str(s["ref_image_path"]),
+            "color_items": items,
+        })
+
+    # looks：Mode C 必传；Mode B 未传则每个色号自动包成单成员 look（成员引用用 uid）
+    looks_spec = fixture.get("looks") or []
+    if not looks_spec:
+        if design_mode == "COLLECTION_2SKU":
+            raise HTTPException(400, "COLLECTION_2SKU 模式必须提供 looks（用户预选的上下装配对）")
+        main = styles[0]
+        looks_spec = [{"name": None, "members": {"main": c["uid"]}} for c in main["color_items"]]
+
+    # 成员引用解析：优先按 uid（文件名）匹配；兼容老 payload 按 code 匹配（要求该 code 无歧义）
+    items_by_role = {st["role"]: st["color_items"] for st in styles}
+
+    def _resolve_member(role: str, ref: str, idx: int) -> dict:
+        pool = items_by_role.get(role)
+        if pool is None:
+            raise HTTPException(400, f"look #{idx + 1} 引用了不存在的款位 role：{role}")
+        hit = next((c for c in pool if c["uid"] == ref), None)
+        if hit:
+            return hit
+        by_code = [c for c in pool if c["code"] == ref]
+        if len(by_code) == 1:
+            return by_code[0]
+        if len(by_code) > 1:
+            names = " / ".join(c["name"] for c in by_code)
+            raise HTTPException(
+                400,
+                f"look #{idx + 1} 成员 ({role}, {ref}) 有歧义：该色号代码对应多个颜色（{names}），"
+                f"请在前端重新点选色号图（按文件名精确引用）",
+            )
+        raise HTTPException(400, f"look #{idx + 1} 成员 ({role}, {ref}) 不在该款色号池中")
+
+    looks: list[dict] = []
+    seen_ids: set[str] = set()
+    for i, lk in enumerate(looks_spec):
+        members_in = lk.get("members") or {}
+        if not members_in:
+            raise HTTPException(400, f"look #{i + 1} 缺少 members")
+        members: dict = {}
+        members_display: dict = {}
+        for role, ref in members_in.items():
+            item = _resolve_member(role, ref, i)
+            members[role] = item["uid"]
+            members_display[role] = f"{item['code']}·{item['name']}"
+        look_id = _look_id_for(members)
+        if look_id in seen_ids:
+            raise HTTPException(400, f"look #{i + 1} 与之前的 look 成员完全重复（{members_display}）")
+        seen_ids.add(look_id)
+        looks.append({
+            "look_id": look_id,
+            "name": lk.get("name") or f"look-{i + 1:02d}",
+            "members": members,                    # role → uid（文件名，唯一）
+            "members_display": members_display,    # role → "code·色名"（展示用）
+        })
+
+    # 未被任何 look 选中的色号不设计（省 token / 生图费）
+    used_by_role: dict[str, set] = {}
+    for lk in looks:
+        for role, uid in lk["members"].items():
+            used_by_role.setdefault(role, set()).add(uid)
+    for st in styles:
+        used = used_by_role.get(st["role"], set())
+        st["color_items"] = [c for c in st["color_items"] if c["uid"] in used]
+
+    primary_style_no = styles[0]["style_no"]
+    if design_mode == "COLLECTION_2SKU":
+        by_role = {st["role"]: st["style_no"] for st in styles}
+        combined = f"{by_role.get('top')}+{by_role.get('bottom')}"
+    else:
+        combined = primary_style_no
+    return styles, looks, primary_style_no, combined
 
 
 def _parse_color_images(folder: Path) -> list[dict]:
@@ -1177,6 +1565,7 @@ def _row_to_summary(row: dict) -> RunSummary:
         gender_ratio=row["gender_ratio"],
         num_designs_k=row["num_designs_k"],
         status=row["status"],
+        design_mode=row.get("design_mode") or "MULTI_TOPIC",
         audit_passed=bool(row["audit_passed"]) if row.get("audit_passed") is not None else None,
         audit_rounds=row.get("audit_rounds"),
         total_tokens_in=row.get("total_tokens_in"),

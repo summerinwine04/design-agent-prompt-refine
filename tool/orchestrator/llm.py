@@ -52,6 +52,33 @@ def extract_output_json(raw: str, output_marker_regex: str):
     return True, None
 
 
+def _maybe_downscale(img_path, max_side: int):
+    """
+    上传前压缩：长边 > max_side 时等比缩小并 re-encode JPEG，返回 (filename, BytesIO)。
+    仅作用于「给 LLM 看」的视觉输入——生图（images.edit）走 generator/runner.py
+    直接读磁盘原文件，与本函数无关，永远用原图。
+    PIL 缺失 / 解码失败 / 图本来就小 → 返回 None（调用方回退原文件）。
+    """
+    try:
+        from PIL import Image
+        import io
+        with Image.open(img_path) as im:
+            w, h = im.size
+            if max(w, h) <= max_side:
+                return None
+            ratio = max_side / max(w, h)
+            im = im.convert("RGB").resize(
+                (max(1, int(w * ratio)), max(1, int(h * ratio))),
+                Image.LANCZOS,
+            )
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=85)
+            buf.seek(0)
+            return (Path(img_path).stem + "_small.jpg", buf)
+    except Exception:
+        return None
+
+
 class LLMClient:
     def __init__(self, *, api_key, default_model="gpt-5.5", default_max_tokens=500000):
         self.api_key = api_key
@@ -76,6 +103,7 @@ class LLMClient:
         max_tokens=None,
         stream_callback=None,
         dry_run=False,
+        image_max_side=None,   # 上传前压缩长边上限（None = 原图直传）。仅影响 LLM 视觉输入
     ):
         model = model or self.default_model
         max_tokens = max_tokens or self.default_max_tokens
@@ -94,8 +122,12 @@ class LLMClient:
         uploaded_file_ids = []
         try:
             for img_path in image_paths:
-                with open(img_path, "rb") as fh:
-                    file_obj = self.client.files.create(file=fh, purpose="vision")
+                small = _maybe_downscale(img_path, image_max_side) if image_max_side else None
+                if small is not None:
+                    file_obj = self.client.files.create(file=small, purpose="vision")
+                else:
+                    with open(img_path, "rb") as fh:
+                        file_obj = self.client.files.create(file=fh, purpose="vision")
                 uploaded_file_ids.append(file_obj.id)
 
             user_content = [{"type": "input_text", "text": user_prompt}]

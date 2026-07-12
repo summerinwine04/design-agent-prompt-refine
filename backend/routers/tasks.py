@@ -58,6 +58,9 @@ class TaskCreateRequest(BaseModel):
 class TaskRegenerateRequest(BaseModel):
     plan_ids: list[str]                        # 要重生的方案编号
     concurrency: int = 2
+    # True = 旧图先备份到 image_root_dir/_archive/{plan_id}_{ts}.png 再覆盖
+    # False（默认）= 直接覆盖
+    keep_original: bool = False
 
 
 class TaskSummary(BaseModel):
@@ -94,6 +97,58 @@ class TaskDetail(TaskSummary):
 async def list_tasks_endpoint(limit: int = 100):
     rows = list_generation_tasks(limit=limit)
     return [_row_to_summary(r) for r in rows]
+
+
+@router.get("/all-images")
+async def list_all_images(limit: int = 200):
+    """
+    跨任务全局图片墙数据源：扫所有 task 的 results 字段，扁平化每张成功的图。
+
+    返回字段 per item：
+      - image_url, plan_id, task_id, trend_name, style_no, color_code, color_name,
+        topic_id, topic_name, created_at, image_prompt_used（用于 Modal 显示完整 prompt）
+    """
+    rows = list_generation_tasks(limit=limit)
+    items = []
+    for r in rows:
+        try:
+            results = json.loads(r.get("results") or "[]")
+        except Exception:
+            results = []
+        try:
+            snapshot_plans = json.loads(r.get("snapshot_plans") or "[]")
+        except Exception:
+            snapshot_plans = []
+        plan_by_id = {p.get("方案编号"): p for p in snapshot_plans}
+
+        for res in results:
+            if res.get("status") != "succeeded" or not res.get("image_url"):
+                continue
+            pid = res.get("plan_id")
+            plan = plan_by_id.get(pid, {})
+            items.append({
+                "image_url": res["image_url"],
+                "plan_id": pid,
+                "task_id": r["id"],
+                "trend_name": r.get("trend_name"),
+                "style_no": r.get("style_no"),
+                "color_code": res.get("color_code") or plan.get("_色号代码") or plan.get("色号代码"),
+                "color_name": res.get("color_name") or plan.get("_营销色名") or plan.get("营销色名"),
+                "topic_id": plan.get("选用子主题编号"),
+                "topic_name": plan.get("选用子主题名称"),
+                "elapsed_ms": res.get("elapsed_ms"),
+                "task_created_at": r.get("created_at"),
+                "task_status": r.get("status"),
+                "image_prompt_used": res.get("image_prompt_used"),
+                "方案说明": plan.get("方案说明"),
+                "适配度": plan.get("适配度"),
+                # v5 CONVERGE：Collection View 按 look_id / role 聚合
+                "role": plan.get("role"),
+                "look_id": plan.get("look_id"),
+            })
+
+    # 按 task 创建时间倒序（DB 已排好，这里保留）
+    return {"total": len(items), "items": items}
 
 
 @router.get("/{task_id}", response_model=TaskDetail)
@@ -167,8 +222,38 @@ async def create_task(req: TaskCreateRequest):
     if not snapshot_plans:
         raise HTTPException(400, "选中方案在源 step2 输出中找不到")
 
-    # 生成 task_id
-    task_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-task"
+    # v5 Mode C（上下装成套）：一个任务里混装上下装方案——
+    # 按 role 构建各自的款图/色号资产（role_assets），runner 逐方案取用对应款图。
+    src_design_mode = (final.get("step2_改款方案") or {}).get("design_mode") or "MULTI_TOPIC"
+    role_assets: dict = {}
+    if src_design_mode == "COLLECTION_2SKU":
+        fixture_styles = (fixture or {}).get("styles") if src_trace.is_file() else None
+        plan_roles = {p.get("role") for p in snapshot_plans if p.get("role")}
+        for role in plan_roles:
+            slot = next((s for s in (fixture_styles or []) if s.get("role") == role), None)
+            if not slot or not slot.get("ref_image_path"):
+                raise HTTPException(400, f"源 run 的 fixture meta 缺少款位 {role} 的款图路径，无法生图")
+            rp = Path(slot["ref_image_path"])
+            if not rp.is_file():
+                raise HTTPException(400, f"款位 {role} 的款图不存在：{rp}")
+            cf = rp.parent / rp.stem
+            if not cf.is_dir():
+                raise HTTPException(400, f"款位 {role} 的色号文件夹不存在：{cf}")
+            role_assets[role] = {
+                "ref_image_path": rp,
+                "color_folder": cf,
+                "color_filename_map": _build_color_filename_map(cf),
+            }
+        # 任务级默认款图取 top（尺寸档位兜底用），单侧混不进来时也不影响
+        if "top" in role_assets:
+            ref_image_path = role_assets["top"]["ref_image_path"]
+            color_folder_path = role_assets["top"]["color_folder"]
+
+    # 生成 task_id——秒级时间戳 + 4 位随机 hex。
+    # 必须带随机后缀：成套模式按款位拆分时，前端会在同一秒内连续 POST 两次，
+    # 纯时间戳 id 会撞 PRIMARY KEY（IntegrityError → 500，第二个任务永远建不起来）。
+    import uuid as _uuid
+    task_id = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + _uuid.uuid4().hex[:4] + "-task"
     # 图片落盘目录
     image_root_dir = ROOT / "data" / "task_images" / task_id
     image_root_dir.mkdir(parents=True, exist_ok=True)
@@ -194,6 +279,7 @@ async def create_task(req: TaskCreateRequest):
         plans=snapshot_plans,
         image_root_dir=image_root_dir,
         concurrency=req.concurrency,
+        role_assets=role_assets,
     )
 
     return _row_to_summary(get_generation_task(task_id))
@@ -225,6 +311,7 @@ async def regenerate_task(task_id: str, req: TaskRegenerateRequest):
     src_trace = Path(src_row["run_dir"]) / "trace.jsonl"
     ref_image_path = ROOT.parent / "ai-supply" / "款图" / f"{row['style_no']}.jpg"
     color_folder_path = ref_image_path.parent / ref_image_path.stem
+    fixture = {}
     if src_trace.is_file():
         first = json.loads(src_trace.read_text(encoding="utf-8").splitlines()[0])
         fixture = first.get("fixture") or {}
@@ -232,6 +319,25 @@ async def regenerate_task(task_id: str, req: TaskRegenerateRequest):
             color_folder_path = Path(fixture["color_folder"])
         if "ref_image" in fixture or "ref_image_path" in fixture:
             ref_image_path = Path(fixture.get("ref_image") or fixture.get("ref_image_path"))
+
+    # v5 成套：目标方案带 role → 按 role 重建款图/色号资产
+    role_assets: dict = {}
+    plan_roles = {p.get("role") for p in target_plans if p.get("role")}
+    if plan_roles:
+        fixture_styles = fixture.get("styles") or []
+        for role in plan_roles:
+            slot = next((s for s in fixture_styles if s.get("role") == role), None)
+            if not slot or not slot.get("ref_image_path"):
+                raise HTTPException(400, f"源 run meta 缺少款位 {role} 的款图路径，无法重生")
+            rp = Path(slot["ref_image_path"])
+            cf = rp.parent / rp.stem
+            if not rp.is_file() or not cf.is_dir():
+                raise HTTPException(400, f"款位 {role} 的款图/色号文件夹不存在：{rp}")
+            role_assets[role] = {
+                "ref_image_path": rp,
+                "color_folder": cf,
+                "color_filename_map": _build_color_filename_map(cf),
+            }
 
     # 标 status = running
     update_generation_task_progress(task_id=task_id, status="running")
@@ -244,6 +350,8 @@ async def regenerate_task(task_id: str, req: TaskRegenerateRequest):
         image_root_dir=Path(row["image_root_dir"]),
         concurrency=req.concurrency,
         merge_with_existing=True,
+        keep_original=req.keep_original,
+        role_assets=role_assets,
     )
 
     return _row_to_summary(get_generation_task(task_id))
@@ -464,17 +572,50 @@ async def prep_from_run(source_run_id: str):
     final = json.loads(final_path.read_text(encoding="utf-8"))
 
     plans = _flatten_step2_plans(final)
-    return {
+
+    step2 = final.get("step2_改款方案") or {}
+    design_mode = step2.get("design_mode") or "MULTI_TOPIC"
+
+    resp = {
         "source_run_id": source_run_id,
         "trend_name": src_row["trend_name"],
         "style_no": src_row["style_no"],
         "ref_image_url": f"/static/styles/{src_row['style_no']}.jpg",   # 由 main.py 挂载
+        "design_mode": design_mode,
         "plans": plans,
         "meta": {
-            "款式分析": final.get("step2_改款方案", {}).get("款式分析"),
-            "趋势说明": final.get("step2_改款方案", {}).get("趋势说明"),
+            "款式分析": step2.get("款式分析"),
+            "趋势说明": step2.get("趋势说明"),
         },
     }
+
+    # v5 CONVERGE：组合 style_no（如 "YK...服+YK...裤"）拼不出静态 URL——
+    # 按 final meta 里的 role/款号/文件名 直接给每个方案下发款图 & 色号图 URL。
+    if design_mode != "MULTI_TOPIC":
+        styles_meta = step2.get("styles") or []
+        resp["styles"] = [
+            {
+                "role": s.get("role"),
+                "style_no": s.get("款号"),
+                "ref_image_url": f"/static/styles/{s.get('款号')}.jpg",
+            }
+            for s in styles_meta
+        ]
+        color_meta = (final.get("meta") or {}).get("色号图列表") or []
+        url_map = {
+            (c.get("款号"), c.get("色号代码"), c.get("营销色名")):
+                f"/static/styles/{c.get('款号')}/{c.get('文件名')}"
+            for c in color_meta
+        }
+        for p in plans:
+            sn = p.get("_款号")
+            key = (sn, p.get("_色号代码") or p.get("色号代码"), p.get("_营销色名") or p.get("营销色名"))
+            if key in url_map:
+                p["_color_image_url"] = url_map[key]
+            if sn:
+                p["_ref_image_url"] = f"/static/styles/{sn}.jpg"
+
+    return resp
 
 
 # ============================================================================
@@ -489,10 +630,13 @@ def _kick_off(
     plans: list[dict],
     image_root_dir: Path,
     concurrency: int,
+    role_assets: dict | None = None,
     merge_with_existing: bool = False,
+    keep_original: bool = False,
 ) -> None:
     """把生图任务丢到线程池。"""
-    api_key = os.environ.get("OPENAI_API_KEY")
+    from backend.db import get_openai_api_key
+    api_key = get_openai_api_key()
     if not api_key:
         raise HTTPException(400, "OPENAI_API_KEY 未设置")
 
@@ -505,6 +649,7 @@ def _kick_off(
         _run_generation_in_thread,
         task_id, api_key, ref_image_path, color_folder, plans,
         image_root_dir, color_filename_map, concurrency, merge_with_existing,
+        keep_original, role_assets or {},
     )
 
 
@@ -518,6 +663,8 @@ def _run_generation_in_thread(
     color_filename_map: dict,
     concurrency: int,
     merge_with_existing: bool,
+    keep_original: bool = False,
+    role_assets: dict | None = None,
 ) -> None:
     """实际跑在线程里。"""
     from generator import GenerationRunner
@@ -545,6 +692,8 @@ def _run_generation_in_thread(
     update_generation_task_progress(task_id=task_id, status="running")
 
     try:
+        # 生图模型从 .env 读：用户在「设置」页改 DEFAULT_IMAGE_MODEL 立即生效
+        image_model = os.environ.get("DEFAULT_IMAGE_MODEL", "gpt-image-2")
         runner = GenerationRunner(
             task_id=task_id,
             api_key=api_key,
@@ -555,6 +704,9 @@ def _run_generation_in_thread(
             color_filename_map=color_filename_map,
             concurrency=concurrency,
             event_callback=event_cb,
+            keep_original=keep_original,
+            model=image_model,
+            role_assets=role_assets or {},
         )
         result = runner.run()
 
@@ -581,6 +733,16 @@ def _run_generation_in_thread(
             completed_at=datetime.now().isoformat(timespec="seconds"),
         )
 
+        # v5 成套模式：任务完成后尝试自动组套入 Fitting Room。
+        # 每个 look 的 top/bottom 成员都已有成功图 → 自动创建 Fitting Room look
+        # （通常上装任务先完成时凑不齐，下装任务完成后这里会把整套配齐）。
+        try:
+            n = _auto_sync_collection_looks(task_id)
+            if n:
+                print(f"[task {task_id}] auto-synced {n} collection look(s) to fitting room", flush=True)
+        except Exception as _sync_err:
+            print(f"[task {task_id}] collection look auto-sync failed: {_sync_err}", flush=True)
+
     except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -594,6 +756,115 @@ def _run_generation_in_thread(
             "status": "failed",
             "error": str(exc),
         })
+
+
+# ============================================================================
+# v5 成套模式：生图完成后自动组套入 Fitting Room
+# ============================================================================
+
+@router.post("/sync-collection-looks/{source_run_id}")
+async def sync_collection_looks_endpoint(source_run_id: str):
+    """手动触发：把某成套 run 已生成的整套 look 同步到 Fitting Room。
+    覆盖「任务在自动同步上线前就已跑完」或想立即补同步的场景。幂等（已入库的套不重复建）。"""
+    rows = [t for t in list_generation_tasks(limit=300) if t.get("source_step2_run_id") == source_run_id]
+    if not rows:
+        raise HTTPException(404, f"该 run 没有生图任务：{source_run_id}")
+    try:
+        created = _auto_sync_collection_looks(rows[0]["id"])
+    except Exception as e:
+        raise HTTPException(500, f"同步失败：{type(e).__name__}: {e}")
+    return {"ok": True, "created": created}
+
+
+def _auto_sync_collection_looks(task_id: str) -> int:
+    """
+    某生图任务完成后调用：若源 run 是 COLLECTION_2SKU，
+    对每个预选 look 检查 top/bottom 成员是否都已有成功图 →
+    是且 Fitting Room 里还没有这套 → 自动创建（tags 带 run_id + look_id 防重复）。
+
+    返回本次新建的 look 数。任何异常由调用方吞掉，不阻断任务收尾。
+    """
+    import secrets
+    import time as _time
+
+    from backend.db import get_generation_task, list_generation_tasks, list_looks, insert_look
+    from backend.db import get_run as _get_run
+
+    task_row = get_generation_task(task_id)
+    if not task_row:
+        return 0
+    source_run_id = task_row["source_step2_run_id"]
+    src_row = _get_run(source_run_id)
+    if not src_row:
+        return 0
+
+    # 读 final JSON
+    final_path = Path(src_row["run_dir"]) / "final_output.json"
+    if not final_path.is_file():
+        final_path = Path(src_row.get("final_json_path") or "")
+    if not final_path.is_file():
+        return 0
+    final = json.loads(final_path.read_text(encoding="utf-8"))
+    step2 = final.get("step2_改款方案") or {}
+    if (step2.get("design_mode") or "MULTI_TOPIC") != "COLLECTION_2SKU":
+        return 0
+
+    meta_looks = (final.get("meta") or {}).get("looks") or []
+    topic = ((step2.get("主题选择") or {}).get("选用主题列表") or [{}])[0]
+    topic_name = topic.get("子主题名称") or ""
+
+    # look_id → {role: [方案编号...]}（按 2.5L 输出顺序，取第一张成功图）
+    plans_by_look: dict[str, dict[str, list[str]]] = {}
+    for lk in step2.get("look方案列表") or []:
+        m: dict[str, list[str]] = {}
+        for mem in lk.get("成员方案") or []:
+            m[mem.get("role")] = [p.get("方案编号") for p in (mem.get("设计方案") or []) if p.get("方案编号")]
+        plans_by_look[lk.get("look_id")] = m
+
+    # 本 run 全部任务的成功图：plan_id → "{task_id}:{plan_id}"（gallery image_id 格式）
+    img_by_plan: dict[str, str] = {}
+    for t in list_generation_tasks(limit=300):
+        if t.get("source_step2_run_id") != source_run_id:
+            continue
+        try:
+            results = json.loads(t.get("results") or "[]")
+        except Exception:
+            results = []
+        for res in results:
+            if res.get("status") == "succeeded" and res.get("image_url") and res.get("plan_id"):
+                img_by_plan.setdefault(res["plan_id"], f"{t['id']}:{res['plan_id']}")
+
+    # 已入库的 (run, look_id) 防重复——自动同步和 Collection View 手动确认共用这套判重
+    existing_look_ids: set[str] = set()
+    for lk in list_looks(limit=1000):
+        try:
+            tags = json.loads(lk.get("tags") or "[]")
+        except Exception:
+            tags = []
+        if source_run_id in tags:
+            existing_look_ids.update(tg for tg in tags if isinstance(tg, str) and tg.startswith("LK-"))
+
+    created = 0
+    for ml in meta_looks:
+        lid = ml.get("look_id")
+        if not lid or lid in existing_look_ids:
+            continue
+        roles = plans_by_look.get(lid) or {}
+        top_img = next((img_by_plan[p] for p in roles.get("top") or [] if p in img_by_plan), None)
+        bottom_img = next((img_by_plan[p] for p in roles.get("bottom") or [] if p in img_by_plan), None)
+        if not top_img or not bottom_img:
+            continue    # 有一侧还没生成成功——等另一侧任务完成时再同步
+        insert_look(
+            id=f"look-{int(_time.time() * 1000)}-{secrets.token_hex(3)}",
+            name=f"{ml.get('name') or lid}·{topic_name}".rstrip("·"),
+            top_kind="image",
+            top_image_id=top_img,
+            bottom_kind="image",
+            bottom_image_id=bottom_img,
+            tags=["collection", "auto-sync", source_run_id, lid],
+        )
+        created += 1
+    return created
 
 
 # ============================================================================
@@ -615,6 +886,14 @@ def _flatten_step2_plans(final: dict) -> list[dict]:
             p.setdefault("_营销色名", name)
             p.setdefault("_性别定向", gender)
             p.setdefault("是否需要变色", needs)
+            # v5 CONVERGE：透传 role / look_id / 款号（Mode C 生图按 role 取各自款图；
+            # Collection View 按 look_id 聚合）。老 run 没这些字段，setdefault 不影响。
+            if color.get("role"):
+                p.setdefault("role", color["role"])
+            if color.get("look_id"):
+                p.setdefault("look_id", color["look_id"])
+            if color.get("款号"):
+                p.setdefault("_款号", color["款号"])
             out.append(p)
     return out
 

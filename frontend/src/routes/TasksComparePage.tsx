@@ -1,9 +1,9 @@
-import { Card, Tag, Space, Spin, Empty, Alert, Modal, Button } from "antd";
-import { useQuery } from "@tanstack/react-query";
+import { Card, Tag, Space, Spin, Empty, Alert, Modal, Button, Checkbox, message } from "antd";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams, Link } from "react-router-dom";
 import { useMemo, useState } from "react";
 
-import { compareTasks } from "../api/client";
+import { compareTasks, regenerateTask } from "../api/client";
 
 /**
  * 多任务对比页（M8）
@@ -21,11 +21,37 @@ export default function TasksComparePage() {
 
   const [cellModal, setCellModal] = useState<{ row: any; cell: any } | null>(null);
   const [diffModal, setDiffModal] = useState<{ row: any; leftCell: any; rightCell: any } | null>(null);
+  const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["tasks-compare", ids.sort().join(",")],
     queryFn: () => compareTasks(ids),
     enabled: ids.length >= 2,
+  });
+
+  // 单图重新生成 mutation：用同一个 prompt 重跑
+  const regenMut = useMutation({
+    mutationFn: (payload: { task_id: string; plan_id: string; keep_original: boolean }) =>
+      regenerateTask(payload.task_id, {
+        plan_ids: [payload.plan_id],
+        concurrency: 1,
+        keep_original: payload.keep_original,
+      }),
+    onSuccess: (_res, vars) => {
+      message.success(
+        `已启动重生成（约 30-60 秒）${vars.keep_original ? "；原图已备份到 _archive/" : ""}。完成后刷新对比页可看到新图。`,
+        6,
+      );
+      // 关闭 modal（用户可手动再点开看进度）
+      setCellModal(null);
+      // 30 秒后自动 refetch 一次（取最新图 URL + 加 cache-buster timestamp）
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ["tasks-compare"] });
+      }, 30000);
+    },
+    onError: (err: any) => {
+      message.error("重新生成失败：" + (err?.response?.data?.detail || err?.message));
+    },
   });
 
   if (ids.length < 2) {
@@ -123,7 +149,20 @@ export default function TasksComparePage() {
         width="70vw"
         footer={null}
       >
-        {cellModal && <CellDetail row={cellModal.row} cell={cellModal.cell} />}
+        {cellModal && (
+          <CellDetail
+            row={cellModal.row}
+            cell={cellModal.cell}
+            onRegenerate={(keepOriginal: boolean) =>
+              regenMut.mutate({
+                task_id: cellModal.cell.task_id,
+                plan_id: cellModal.cell.plan_id,
+                keep_original: keepOriginal,
+              })
+            }
+            isRegenerating={regenMut.isPending}
+          />
+        )}
       </Modal>
 
       {/* Diff 模态 */}
@@ -168,8 +207,11 @@ function CompareCell({ cell, row, isBaseline, onShowDetail, onShowDiff }: any) {
   if (!cell || cell.image_status === "missing") {
     return (
       <div style={{
+        height: "30vh",
         background: "#fafafa", borderRadius: 4, padding: 16,
+        display: "flex", alignItems: "center", justifyContent: "center",
         textAlign: "center", color: "#999", fontSize: 12,
+        border: "1px dashed #eee",
       }}>
         该 task 无此色号
       </div>
@@ -178,10 +220,10 @@ function CompareCell({ cell, row, isBaseline, onShowDetail, onShowDiff }: any) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {/* 图片 */}
+      {/* 图片：固定 30vh 高度（不再 aspectRatio 撑大），让一屏可看 ≥2 色号 */}
       <div
         style={{
-          aspectRatio: "1/1.2",
+          width: "100%", height: "30vh",
           background: "#fafafa", borderRadius: 4, overflow: "hidden",
           display: "flex", alignItems: "center", justifyContent: "center",
           cursor: cell.image_url ? "pointer" : "default",
@@ -190,7 +232,11 @@ function CompareCell({ cell, row, isBaseline, onShowDetail, onShowDiff }: any) {
         onClick={() => cell.image_url && onShowDetail()}
       >
         {cell.image_url ? (
-          <img src={cell.image_url} alt={row.color_key} style={{ maxWidth: "100%", maxHeight: "100%" }} />
+          <img
+            src={cell.image_url}
+            alt={row.color_key}
+            style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+          />
         ) : cell.image_status === "failed" ? (
           <div style={{ color: "#ff4d4f", textAlign: "center", padding: 8 }}>
             <div>✗ 失败</div>
@@ -225,7 +271,52 @@ function CompareCell({ cell, row, isBaseline, onShowDetail, onShowDiff }: any) {
 }
 
 
-function CellDetail({ row, cell }: { row: any; cell: any }) {
+function CellDetail({ row, cell, onRegenerate, isRegenerating }: {
+  row: any;
+  cell: any;
+  onRegenerate?: (keepOriginal: boolean) => void;
+  isRegenerating?: boolean;
+}) {
+  // 「重新生成」按钮：弹出 Modal 让用户选「直接覆盖」还是「保留原图副本」
+  const handleRegenerateClick = () => {
+    if (!onRegenerate) return;
+    if (!cell.image_prompt_used) {
+      message.warning("没有 prompt 可复用");
+      return;
+    }
+    let keepOriginal = false;
+    Modal.confirm({
+      title: `↻ 重新生成 ${row.color_key} 的图`,
+      icon: null,
+      width: 520,
+      content: (
+        <div style={{ fontSize: 13 }}>
+          <p>会用 <strong>同一份 prompt</strong> 再调一次 gpt-image-2，约 30-60 秒。</p>
+          <p style={{ color: "#999", fontSize: 12 }}>
+            （由于 LLM 生图有随机性，新图会和原图有差异——用于"再 roll 一次"）
+          </p>
+          <div style={{ marginTop: 16, padding: 12, background: "#fafafa", borderRadius: 4 }}>
+            <Checkbox
+              defaultChecked={false}
+              onChange={(e) => {
+                keepOriginal = e.target.checked;
+              }}
+            >
+              <span>保留原图副本</span>
+            </Checkbox>
+            <div style={{ fontSize: 11, color: "#999", marginTop: 4, marginLeft: 24 }}>
+              勾选后原图会先复制到 <code>_archive/</code> 子目录再被覆盖；不勾就直接替换。
+            </div>
+          </div>
+        </div>
+      ),
+      okText: "重新生成",
+      cancelText: "取消",
+      okButtonProps: { type: "primary" },
+      onOk: () => onRegenerate(keepOriginal),
+    });
+  };
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
       <div>
@@ -233,6 +324,18 @@ function CellDetail({ row, cell }: { row: any; cell: any }) {
           <img src={cell.image_url} alt={row.color_key} style={{ width: "100%", borderRadius: 4 }} />
         ) : (
           <div style={{ background: "#fafafa", padding: 40, textAlign: "center" }}>图不可用</div>
+        )}
+        {onRegenerate && (
+          <Button
+            block
+            type="primary"
+            loading={isRegenerating}
+            disabled={!cell.image_prompt_used}
+            style={{ marginTop: 8 }}
+            onClick={handleRegenerateClick}
+          >
+            ↻ 用相同 prompt 重新生成此图
+          </Button>
         )}
       </div>
       <div>

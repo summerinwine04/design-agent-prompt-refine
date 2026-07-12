@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 # ============================================================================
 
 class PromptVersion(BaseModel):
-    node_id: str           # "2.1", "2.2", "2.3", "2.4", "2.7"
+    node_id: str           # v4: "2.1", "2.2", "2.3", "2.4", "2.5", "2.8"
     version: str           # "current" / "v1" / "v2"
     file_path: str
     description: Optional[str] = None
@@ -35,29 +35,81 @@ class PromptUpdateRequest(BaseModel):
 # Fixtures
 # ============================================================================
 
+# v5 设计模式：
+#   MULTI_TOPIC          —— Mode A 现状（多子主题发散，DIVERGE 图）
+#   SINGLE_TOPIC_STRONG  —— Mode B 单款强单主题（母图案收敛，CONVERGE 图）
+#   COLLECTION_2SKU      —— Mode C 上下装成套（look 预选 + 联合设计，CONVERGE 图）
+DesignMode = Literal["MULTI_TOPIC", "SINGLE_TOPIC_STRONG", "COLLECTION_2SKU"]
+
+
+class StyleSlotSpec(BaseModel):
+    """CONVERGE 模式的一个款位。Mode B 一个（role=main）；Mode C 两个（top/bottom）。"""
+    role: str                                  # "main" | "top" | "bottom"
+    ref_image_path: str
+    color_folder: str
+    selected_colors: Optional[list[str]] = None
+
+
+class LookSpec(BaseModel):
+    """用户预选的一套 look。members: role → color_code。"""
+    name: Optional[str] = None
+    members: dict[str, str]
+
+
+class PatternBlueprint(BaseModel):
+    """2.4.5 母图案 Blueprint 输出的强类型（在 final JSON 里落盘；可被 API 返回）。"""
+    blueprint_id: Optional[str] = None
+    input_source: str = "trend_report"                     # trend_report | pattern_library
+    所属主题: str
+    母图案概念: str
+    核心元素锚点: dict                                     # {"固定不变的元素": [...], "允许变体的元素": [...]}
+    母配色关系: dict                                       # {"主色_role": ..., "辅色_role": ..., "点缀色_role": ...}
+    核心参考图集: list[str] = Field(default_factory=list)   # 图库输入时 = 用户预筛的 1-3 张图文件名
+    placement候选池: dict                                  # {"main": [...], "top": [...], "bottom": [...]}
+
+
 class Fixture(BaseModel):
     id: str
     name: str
-    trend_json_path: str
-    ref_image_path: str
-    color_folder: str
+    # 老输入源单款场景仍必填（老 fixture 兼容）；图库输入或多款场景可为空
+    trend_json_path: Optional[str] = None
+    ref_image_path: Optional[str] = None
+    color_folder: Optional[str] = None
     selected_colors: Optional[list[str]] = None
     gender_ratio: str
     num_designs_k: int
     description: Optional[str] = None
     created_at: str
+    # v5 collection
+    design_mode: DesignMode = "MULTI_TOPIC"
+    styles: Optional[list[StyleSlotSpec]] = None
+    looks: Optional[list[LookSpec]] = None
+    color_strategy: Optional[str] = None
+    # v6 图库输入
+    input_source: str = "trend_report"                     # trend_report | pattern_library
+    pattern_library_path: Optional[str] = None             # 相对 PATTERN_LIBRARY_ROOT 的文件夹名
+    pattern_library_selected_files: Optional[list[str]] = None  # 用户预筛 1-3 张
 
 
 class FixtureCreateRequest(BaseModel):
     id: str = Field(..., description="人类可读 slug，如 shanxi_yk250609")
     name: str
-    trend_json_path: str
-    ref_image_path: str
-    color_folder: str
+    trend_json_path: Optional[str] = None
+    ref_image_path: Optional[str] = None
+    color_folder: Optional[str] = None
     selected_colors: Optional[list[str]] = None
     gender_ratio: str = "男女比接近1:1"
     num_designs_k: int = 1
     description: Optional[str] = None
+    # v5
+    design_mode: DesignMode = "MULTI_TOPIC"
+    styles: Optional[list[StyleSlotSpec]] = None
+    looks: Optional[list[LookSpec]] = None
+    color_strategy: Optional[str] = None
+    # v6
+    input_source: str = "trend_report"
+    pattern_library_path: Optional[str] = None
+    pattern_library_selected_files: Optional[list[str]] = None
 
 
 # ============================================================================
@@ -74,6 +126,12 @@ class RunCreateRequest(BaseModel):
     gender_ratio: str = "男女比接近1:1"
     num_designs_k: int = 1
 
+    # v5 / v6：inline fixture 场景下补齐 design mode / input source
+    design_mode: DesignMode = "MULTI_TOPIC"
+    input_source: str = "trend_report"
+    pattern_library_path: Optional[str] = None
+    pattern_library_selected_files: Optional[list[str]] = None
+
     prompt_bundle: PromptBundleSpec = PromptBundleSpec()
     model: str = "gpt-5.5"
     max_tokens: int = 500000
@@ -81,6 +139,17 @@ class RunCreateRequest(BaseModel):
     max_audit_rounds: int = 2
     a_tier_quota: Optional[int] = None
     dry_run: bool = False
+    # 历史避重：查同款+同趋势最近 5 轮 succeeded run，注入 2.4/2.5 prompt 让 LLM 避免雷同
+    diversity_avoid_history: bool = True
+    # 款级缓存：2.1 款式分析 / 2.2 颜色识别结果跨 run/趋势/模式复用（同款+同图+同 prompt+同模型）
+    reuse_style_analysis: bool = True
+
+    # v5 设计模式（默认 Mode A，老前端/老调用完全兼容）
+    design_mode: DesignMode = "MULTI_TOPIC"
+    # CONVERGE 模式：款位定义。Mode B 可不传（自动用 ref_image_path/color_folder 包装成 main）
+    styles: Optional[list[StyleSlotSpec]] = None
+    # CONVERGE 模式：look 预选清单。Mode B 可不传（每个色号自动包成单成员 look）；Mode C 必传
+    looks: Optional[list[LookSpec]] = None
 
 
 class RunForkRequest(BaseModel):
@@ -111,6 +180,7 @@ class RunSummary(BaseModel):
     gender_ratio: str
     num_designs_k: int
     status: RunStatus
+    design_mode: Optional[str] = "MULTI_TOPIC"
     audit_passed: Optional[bool] = None
     audit_rounds: Optional[int] = None
     total_tokens_in: Optional[int] = None
@@ -148,15 +218,96 @@ class NodeDetail(BaseModel):
 
 class Settings(BaseModel):
     has_openai_key: bool
-    default_model: str
+    default_model: str                            # 推理（文本 LLM）默认模型
+    default_image_model: str                      # 生图默认模型（gpt-image-2 / gpt-image-1）
     default_max_tokens: int
     default_color_concurrency: int
     runs_dir: str
     prompts_dir: str
+    # 账单：LLM 单价（$/1M tokens），用于成本折算展示（默认 30/30）
+    llm_price_input_per_1m: float = 30.0
+    llm_price_output_per_1m: float = 30.0
+    # 公网访问：两组密码是否已配置（不回显明文）
+    has_public_admin_password: bool = False
+    has_public_guest_password: bool = False
 
 
 class SettingsUpdate(BaseModel):
     openai_api_key: Optional[str] = None          # 写入不回显
     default_model: Optional[str] = None
+    default_image_model: Optional[str] = None
     default_max_tokens: Optional[int] = None
     default_color_concurrency: Optional[int] = None
+    llm_price_input_per_1m: Optional[float] = None
+    llm_price_output_per_1m: Optional[float] = None
+    # 公网访问密码（写入 .env；传空字符串 = 清除禁用）
+    public_admin_password: Optional[str] = None
+    public_guest_password: Optional[str] = None
+
+
+# ============================================================================
+# Fitting Room
+# ============================================================================
+
+class Look(BaseModel):
+    id: str
+    name: str
+    top_kind: Optional[str] = None            # "image" | "text" | None
+    top_image_id: Optional[str] = None
+    top_text: Optional[str] = None
+    bottom_kind: Optional[str] = None
+    bottom_image_id: Optional[str] = None
+    bottom_text: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+    # 拍摄配置槽位（Try-on 集成）
+    shooting_slot_kind: Optional[str] = None  # "upload" | "template" | None
+    shooting_slot_url: Optional[str] = None
+    shooting_slot_meta: Optional[dict] = None
+    created_at: str
+    updated_at: str
+
+
+class LookCreateItem(BaseModel):
+    name: Optional[str] = None                # 空则自动 "look-NN"
+    top_kind: Optional[str] = None
+    top_image_id: Optional[str] = None
+    top_text: Optional[str] = None
+    bottom_kind: Optional[str] = None
+    bottom_image_id: Optional[str] = None
+    bottom_text: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+
+
+class LookBulkCreateRequest(BaseModel):
+    """一次批量提交（从 Gallery 组套完成后 push 多条）"""
+    looks: list[LookCreateItem]
+
+
+class LookUpdate(BaseModel):
+    """PATCH：所有字段可选，None 表示不动"""
+    name: Optional[str] = None
+    top_kind: Optional[str] = None
+    top_image_id: Optional[str] = None
+    top_text: Optional[str] = None
+    bottom_kind: Optional[str] = None
+    bottom_image_id: Optional[str] = None
+    bottom_text: Optional[str] = None
+    tags: Optional[list[str]] = None
+    shooting_slot_kind: Optional[str] = None
+    shooting_slot_url: Optional[str] = None
+    shooting_slot_meta: Optional[dict] = None
+
+
+class ImageCategoryItem(BaseModel):
+    image_id: str
+    category: str                             # "top" | "bottom"
+    source: str = "manual"
+
+
+class ImageCategoryBulkRequest(BaseModel):
+    items: list[ImageCategoryItem]
+
+
+class LooksExportRequest(BaseModel):
+    """POST /looks/export-to-desktop：批量把选中的 look 图片导出到用户桌面。"""
+    look_ids: list[str]

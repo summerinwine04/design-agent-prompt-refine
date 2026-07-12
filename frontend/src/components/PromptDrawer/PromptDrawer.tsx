@@ -44,8 +44,8 @@ interface PromptDrawerProps {
   nodeName?: string;
 }
 
-// 5 个有 prompt 的子节点。其他业务编号（2.5/2.6 等）不允许编辑
-const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.7"]);
+// v4：6 个有 prompt 的子节点。其他业务编号（2.6 审计 / 2.7 决策）不允许编辑
+const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.5", "2.8"]);
 
 export default function PromptDrawer({ open, onClose, nodeBizId, nodeName }: PromptDrawerProps) {
   const queryClient = useQueryClient();
