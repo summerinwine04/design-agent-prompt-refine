@@ -1,16 +1,18 @@
 import {
-  Alert, Button, Card, Checkbox, Empty, Image, Input, Modal, Space, Spin, Tag, Tooltip,
+  Alert, Button, Card, Checkbox, Empty, Image, Input, Modal, Pagination, Space, Spin, Tag, Tooltip,
   Select, message, Segmented,
 } from "antd";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  Look, deleteLook, duplicateLook, exportLooksJson, exportLooksToDesktop,
+  Look, deleteLook, duplicateLook, exportLooksToDesktop,
   listAllImages, listLooks, updateLook,
   clearShootingSlot, getTemplatesData, setShootingSlotTemplate, uploadShootingSlot,
   TemplatesData,
+  Wave, listWaves, createWave, updateWave, deleteWave,
+  assignLooksToWave, unassignLooksFromWave, getSettings,
 } from "../api/client";
 
 /**
@@ -94,9 +96,88 @@ export default function FittingRoomPage() {
     onError: (e: any) => message.error("保存失败：" + (e?.message || String(e))),
   });
 
-  // 批量导出到桌面：select mode + 选中集合 + mutation
+  // 多选态：进入后底部操作条同时提供 波段归组 + 导出（不预分目的，少一次选择）
   const [selectMode, setSelectMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+  // ── 波段上新管理 ──────────────────────────────────────────
+  const [viewMode, setViewMode] = useState<"flat" | "waves">("flat");
+  const [waveFilter, setWaveFilter] = useState<string>("all");   // all | none | <wave_id>
+  const [createWaveOpen, setCreateWaveOpen] = useState(false);
+  const [collapsedWaves, setCollapsedWaves] = useState<Set<string>>(new Set());
+
+  // 平铺视图翻页：20 组 look/页，筛选/排序/视图变化回第 1 页
+  // （必须放在 waveFilter/viewMode 声明之后，否则 TDZ 报错白屏）
+  const LOOK_PAGE_SIZE = 20;
+  const [lookPage, setLookPage] = useState(1);
+  useEffect(() => { setLookPage(1); }, [waveFilter, sortBy, viewMode]);
+  const flatLooks = useMemo(
+    () => sortedLooks.filter((lk) =>
+      waveFilter === "all" ? true
+      : waveFilter === "none" ? !lk.wave_id
+      : lk.wave_id === waveFilter),
+    [sortedLooks, waveFilter],
+  );
+  const pagedFlatLooks = useMemo(
+    () => flatLooks.slice((lookPage - 1) * LOOK_PAGE_SIZE, lookPage * LOOK_PAGE_SIZE),
+    [flatLooks, lookPage],
+  );
+
+  // 访客探测（与 App 同 queryKey 共享缓存，不发额外请求）：403 = 访客 → 波段只读
+  const { isError: isGuest } = useQuery({
+    queryKey: ["access-probe"],
+    queryFn: getSettings,
+    retry: false,
+    staleTime: Infinity,
+  });
+
+  const { data: waves } = useQuery({ queryKey: ["waves"], queryFn: listWaves });
+  const waveById = useMemo(
+    () => new Map<string, Wave>((waves || []).map((w) => [w.id, w])),
+    [waves],
+  );
+
+  const invalidateWaveData = () => {
+    queryClient.invalidateQueries({ queryKey: ["waves"] });
+    queryClient.invalidateQueries({ queryKey: ["looks"] });
+  };
+  const exitSelect = () => { setSelectMode(false); setSelectedIds(new Set()); };
+
+  const waveCreateMut = useMutation({
+    mutationFn: (p: { name: string; planned_launch_date?: string | null; look_ids?: string[] }) =>
+      createWave(p),
+    onSuccess: (w) => {
+      message.success(`已创建波段「${w.name}」${w.look_count ? `，含 ${w.look_count} 套 look` : ""}`);
+      setCreateWaveOpen(false);
+      exitSelect();
+      invalidateWaveData();
+    },
+    onError: (e: any) => message.error("创建波段失败：" + (e?.response?.data?.detail || e?.message)),
+  });
+  const waveUpdateMut = useMutation({
+    mutationFn: (p: { id: string; changes: { name?: string; planned_launch_date?: string; status?: string } }) =>
+      updateWave(p.id, p.changes),
+    onSuccess: () => invalidateWaveData(),
+    onError: (e: any) => message.error("更新波段失败：" + (e?.response?.data?.detail || e?.message)),
+  });
+  const waveDeleteMut = useMutation({
+    mutationFn: (id: string) => deleteWave(id),
+    onSuccess: (d: any) => {
+      message.success(`波段已删除，${d?.released_looks ?? 0} 套 look 回到未分波段`);
+      invalidateWaveData();
+    },
+    onError: (e: any) => message.error("删除波段失败：" + (e?.response?.data?.detail || e?.message)),
+  });
+  const assignMut = useMutation({
+    mutationFn: (p: { waveId: string; lookIds: string[] }) => assignLooksToWave(p.waveId, p.lookIds),
+    onSuccess: () => { message.success("已加入波段"); exitSelect(); invalidateWaveData(); },
+    onError: (e: any) => message.error("归组失败：" + (e?.response?.data?.detail || e?.message)),
+  });
+  const unassignMut = useMutation({
+    mutationFn: (lookIds: string[]) => unassignLooksFromWave(lookIds),
+    onSuccess: () => { message.success("已移出波段"); exitSelect(); invalidateWaveData(); },
+    onError: (e: any) => message.error("移出失败：" + (e?.response?.data?.detail || e?.message)),
+  });
 
   const exportMut = useMutation({
     mutationFn: (ids: string[]) => exportLooksToDesktop(ids),
@@ -202,7 +283,7 @@ export default function FittingRoomPage() {
             )}
           </span>
         </Space>
-        <Space>
+        <Space wrap>
           {selectMode ? (
             <>
               <span style={{ fontSize: 13, color: "#1677ff" }}>
@@ -221,44 +302,97 @@ export default function FittingRoomPage() {
               >
                 清空
               </Button>
+              {!isGuest && (
+                <>
+                  <span style={{ color: "#e8e8e8" }}>|</span>
+                  <Select
+                    size="small"
+                    placeholder="🌊 加入波段..."
+                    style={{ width: 150 }}
+                    disabled={selectedIds.size === 0 || (waves || []).length === 0}
+                    value={null as any}
+                    options={(waves || []).map((w) => ({
+                      value: w.id,
+                      label: `${w.name}（${w.look_count}）`,
+                    }))}
+                    onSelect={(wid: any) =>
+                      assignMut.mutate({ waveId: String(wid), lookIds: Array.from(selectedIds) })
+                    }
+                  />
+                  <Button
+                    size="small"
+                    disabled={selectedIds.size === 0}
+                    onClick={() => setCreateWaveOpen(true)}
+                  >
+                    ➕ 新波段
+                  </Button>
+                  <Button
+                    size="small"
+                    disabled={selectedIds.size === 0}
+                    loading={unassignMut.isPending}
+                    onClick={() => unassignMut.mutate(Array.from(selectedIds))}
+                  >
+                    移出波段
+                  </Button>
+                </>
+              )}
+              <span style={{ color: "#e8e8e8" }}>|</span>
               <Button
+                size="small"
                 type="primary"
                 disabled={selectedIds.size === 0}
                 loading={exportMut.isPending}
                 onClick={() => exportMut.mutate(Array.from(selectedIds))}
               >
-                ✅ 确认导出 {selectedIds.size} 套
+                📤 导出 {selectedIds.size} 套
               </Button>
-              <Button
-                onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}
-                disabled={exportMut.isPending}
-              >
+              <Button size="small" onClick={exitSelect} disabled={exportMut.isPending}>
                 取消
               </Button>
             </>
           ) : (
             <>
-              <Link to="/tasks/gallery?compose=1">
-                <Button type="primary">➕ 从 Gallery 组套</Button>
+              <Link to="/selection?compose=1">
+                <Button type="primary">➕ 去选款中心组套</Button>
               </Link>
               <Segmented
-                size="small"
-                value={sortBy}
-                onChange={(v) => setSortBy(v as any)}
+                value={viewMode}
+                onChange={(v) => setViewMode(v as any)}
                 options={[
-                  { label: "按创建时间", value: "created" },
-                  { label: "按更新时间", value: "updated" },
-                  { label: "按名称", value: "name" },
+                  { label: "平铺", value: "flat" },
+                  { label: "🌊 波段", value: "waves" },
                 ]}
               />
+              {viewMode === "flat" && (
+                <>
+                  <Select
+                    style={{ width: 116 }}
+                    value={sortBy}
+                    onChange={(v) => setSortBy(v as any)}
+                    options={[
+                      { value: "created", label: "按创建时间" },
+                      { value: "updated", label: "按更新时间" },
+                      { value: "name", label: "按名称" },
+                    ]}
+                  />
+                  <Select
+                    style={{ width: 130 }}
+                    value={waveFilter}
+                    onChange={setWaveFilter}
+                    options={[
+                      { value: "all", label: "全部波段" },
+                      { value: "none", label: "未分波段" },
+                      ...(waves || []).map((w) => ({ value: w.id, label: w.name })),
+                    ]}
+                  />
+                </>
+              )}
               <Button
                 disabled={stats.total === 0}
                 onClick={() => { setSelectMode(true); setSelectedIds(new Set()); }}
               >
-                📤 导出图片
+                ☑ 多选（归组 / 导出）
               </Button>
-              <Button onClick={exportLooksJson}>⬇ 导出 JSON</Button>
-              <Link to="/tasks/gallery"><Button>全部生图</Button></Link>
             </>
           )}
         </Space>
@@ -268,37 +402,144 @@ export default function FittingRoomPage() {
         <Empty
           description={
             <span>
-              还没有 look。去 <Link to="/tasks/gallery?compose=1">全部生图 → 组套模式</Link> 开始点选。
+              还没有 look。先去 <Link to="/tasks/gallery?compose=1">全部生图</Link> 选款入仓，再到 <Link to="/selection?compose=1">选款中心 → 组套模式</Link> 配套。
             </span>
           }
           style={{ marginTop: 60 }}
         />
+      ) : viewMode === "flat" ? (
+        <>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fill, minmax(480px, 1fr))",
+              gap: 16,
+            }}
+          >
+            {pagedFlatLooks.map((lk) => (
+              <LookCard
+                key={lk.id}
+                look={lk}
+                waveName={lk.wave_id ? waveById.get(lk.wave_id)?.name : null}
+                imageById={imageById}
+                onDelete={() => delMut.mutate(lk.id)}
+                onDuplicate={() => dupMut.mutate(lk.id)}
+                onSave={(changes) => updMut.mutate({ id: lk.id, changes })}
+                isSaving={updMut.isPending}
+                onPreview={setPreviewItem}
+                onOpenTemplatePicker={() => setPickerTargetLookId(lk.id)}
+                selectMode={selectMode}
+                selected={selectedIds.has(lk.id)}
+                onToggleSelect={() => toggleSelectId(lk.id)}
+              />
+            ))}
+          </div>
+          {flatLooks.length > LOOK_PAGE_SIZE && (
+            <div style={{ display: "flex", justifyContent: "center", marginTop: 20 }}>
+              <Pagination
+                current={lookPage}
+                pageSize={LOOK_PAGE_SIZE}
+                total={flatLooks.length}
+                showSizeChanger={false}
+                showTotal={(t) => `共 ${t} 组 look`}
+                onChange={(p) => { setLookPage(p); window.scrollTo({ top: 0 }); }}
+              />
+            </div>
+          )}
+        </>
       ) : (
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(400px, 1fr))",
-            gap: 16,
-          }}
-        >
-          {sortedLooks.map((lk) => (
-            <LookCard
-              key={lk.id}
-              look={lk}
-              imageById={imageById}
-              onDelete={() => delMut.mutate(lk.id)}
-              onDuplicate={() => dupMut.mutate(lk.id)}
-              onSave={(changes) => updMut.mutate({ id: lk.id, changes })}
-              isSaving={updMut.isPending}
-              onPreview={setPreviewItem}
-              onOpenTemplatePicker={() => setPickerTargetLookId(lk.id)}
-              selectMode={selectMode}
-              selected={selectedIds.has(lk.id)}
-              onToggleSelect={() => toggleSelectId(lk.id)}
-            />
-          ))}
-        </div>
+        // ── 波段聚合视图：未分波段置顶，其后按预备上架时间排序 ──
+        <>
+          {[
+            { wave: null as Wave | null, looks: sortedLooks.filter((lk) => !lk.wave_id) },
+            ...(waves || []).map((w) => ({
+              wave: w as Wave | null,
+              looks: sortedLooks.filter((lk) => lk.wave_id === w.id),
+            })),
+          ].map(({ wave, looks: sectionLooks }) => {
+            const secKey = wave?.id || "__unassigned__";
+            const collapsed = collapsedWaves.has(secKey);
+            return (
+              <div key={secKey} style={{ marginBottom: 20 }}>
+                <WaveSectionHeader
+                  wave={wave}
+                  lookCount={wave ? wave.look_count : sectionLooks.length}
+                  styleCount={wave ? wave.style_count : undefined}
+                  collapsed={collapsed}
+                  onToggleCollapse={() =>
+                    setCollapsedWaves((prev) => {
+                      const next = new Set(prev);
+                      if (next.has(secKey)) next.delete(secKey); else next.add(secKey);
+                      return next;
+                    })
+                  }
+                  isGuest={!!isGuest}
+                  onUpdate={(changes) => wave && waveUpdateMut.mutate({ id: wave.id, changes })}
+                  onDelete={() => wave && Modal.confirm({
+                    title: `删除波段「${wave.name}」？`,
+                    icon: null,
+                    content: `${wave.look_count} 套 look 将回到未分波段池（不会删除 look 本身）。`,
+                    okText: "删除波段",
+                    okType: "danger",
+                    cancelText: "取消",
+                    onOk: () => waveDeleteMut.mutate(wave.id),
+                  })}
+                  onExport={() => sectionLooks.length > 0 && exportMut.mutate(sectionLooks.map((lk) => lk.id))}
+                  exporting={exportMut.isPending}
+                />
+                {!collapsed && (
+                  sectionLooks.length === 0 ? (
+                    <div style={{ padding: "12px 0 4px", fontSize: 12, color: "#bbb" }}>
+                      （空波段——用「☑ 多选」勾选 look 后加进来）
+                    </div>
+                  ) : (
+                    <div
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "repeat(auto-fill, minmax(480px, 1fr))",
+                        gap: 16,
+                        marginTop: 12,
+                      }}
+                    >
+                      {sectionLooks.map((lk) => (
+                        <LookCard
+                          key={lk.id}
+                          look={lk}
+                          imageById={imageById}
+                          onDelete={() => delMut.mutate(lk.id)}
+                          onDuplicate={() => dupMut.mutate(lk.id)}
+                          onSave={(changes) => updMut.mutate({ id: lk.id, changes })}
+                          isSaving={updMut.isPending}
+                          onPreview={setPreviewItem}
+                          onOpenTemplatePicker={() => setPickerTargetLookId(lk.id)}
+                          selectMode={selectMode}
+                          selected={selectedIds.has(lk.id)}
+                          onToggleSelect={() => toggleSelectId(lk.id)}
+                        />
+                      ))}
+                    </div>
+                  )
+                )}
+              </div>
+            );
+          })}
+        </>
       )}
+
+      {/* 创建波段 Modal（多选归组时可顺带把已选 look 归入） */}
+      <CreateWaveModal
+        open={createWaveOpen}
+        selectedCount={selectedIds.size}
+        loading={waveCreateMut.isPending}
+        onCancel={() => setCreateWaveOpen(false)}
+        onSubmit={(name, date) =>
+          waveCreateMut.mutate({
+            name,
+            planned_launch_date: date || null,
+            look_ids: Array.from(selectedIds),
+          })
+        }
+      />
 
       {/* 视觉模板库 Picker Modal */}
       <TemplatePickerModal
@@ -329,6 +570,194 @@ export default function FittingRoomPage() {
         {previewItem && <ImagePreview item={previewItem} />}
       </Modal>
     </div>
+  );
+}
+
+
+// ========================================================================
+// 波段区块头 —— 元信息条 + 行内编辑（wave=null 表示「未分波段」池）
+// ========================================================================
+function WaveSectionHeader({
+  wave, lookCount, styleCount, collapsed, onToggleCollapse,
+  isGuest, onUpdate, onDelete, onExport, exporting,
+}: {
+  wave: Wave | null;
+  lookCount: number;
+  styleCount?: number;
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+  isGuest: boolean;
+  onUpdate: (changes: { name?: string; planned_launch_date?: string; status?: string }) => void;
+  onDelete: () => void;
+  onExport: () => void;
+  exporting: boolean;
+}) {
+  const [editName, setEditName] = useState(false);
+  const [nameDraft, setNameDraft] = useState(wave?.name || "");
+
+  const commitName = () => {
+    const v = nameDraft.trim();
+    if (wave && v && v !== wave.name) onUpdate({ name: v });
+    setEditName(false);
+  };
+
+  const fmt = (s?: string | null) => (s || "").slice(0, 16).replace("T", " ");
+
+  return (
+    <div
+      style={{
+        display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        padding: "8px 12px",
+        background: wave ? "#fafafa" : "#fffbe6",
+        border: "1px solid #f0f0f0", borderRadius: 6,
+      }}
+    >
+      <span
+        onClick={onToggleCollapse}
+        style={{ cursor: "pointer", fontSize: 12, color: "#999", userSelect: "none", width: 14 }}
+        title={collapsed ? "展开" : "折叠"}
+      >
+        {collapsed ? "▶" : "▼"}
+      </span>
+
+      {wave ? (
+        editName && !isGuest ? (
+          <Input
+            size="small"
+            autoFocus
+            value={nameDraft}
+            onChange={(e) => setNameDraft(e.target.value)}
+            onPressEnter={commitName}
+            onBlur={commitName}
+            style={{ width: 180 }}
+          />
+        ) : (
+          <strong
+            style={{ fontSize: 14, cursor: isGuest ? "default" : "pointer" }}
+            title={isGuest ? "" : "点击重命名"}
+            onClick={() => { if (!isGuest) { setNameDraft(wave.name); setEditName(true); } }}
+          >
+            🌊 {wave.name}
+          </strong>
+        )
+      ) : (
+        <strong style={{ fontSize: 14 }}>📥 未分波段</strong>
+      )}
+
+      {wave && (
+        <Tag
+          color={wave.status === "已上架" ? "green" : "blue"}
+          style={{ margin: 0, cursor: isGuest ? "default" : "pointer" }}
+          title={isGuest ? "" : "点击切换状态"}
+          onClick={() => {
+            if (isGuest) return;
+            onUpdate({ status: wave.status === "已上架" ? "规划中" : "已上架" });
+          }}
+        >
+          {wave.status}
+        </Tag>
+      )}
+
+      {wave && (
+        <span style={{ fontSize: 12, color: "#666", display: "inline-flex", alignItems: "center", gap: 4 }}>
+          预备上架
+          {isGuest ? (
+            <strong>{wave.planned_launch_date || "未定"}</strong>
+          ) : (
+            <Input
+              type="date"
+              size="small"
+              value={wave.planned_launch_date || ""}
+              onChange={(e) => onUpdate({ planned_launch_date: e.target.value })}
+              style={{ width: 130, fontSize: 12 }}
+            />
+          )}
+        </span>
+      )}
+
+      <span style={{ fontSize: 12, color: "#666" }}>
+        <strong style={{ color: "#722ed1" }}>{styleCount ?? "-"}</strong> 款
+        · <strong style={{ color: "#1677ff" }}>{lookCount}</strong> look
+      </span>
+
+      {wave && (
+        <span style={{ fontSize: 11, color: "#bbb" }}>
+          创建 {fmt(wave.created_at)} · 更新 {fmt(wave.updated_at)}
+        </span>
+      )}
+
+      <span style={{ flex: 1 }} />
+
+      {wave && (
+        <Space size={4}>
+          <Button size="small" loading={exporting} disabled={lookCount === 0} onClick={onExport}>
+            📤 导出本波段
+          </Button>
+          {!isGuest && (
+            <Button size="small" danger onClick={onDelete}>删除波段</Button>
+          )}
+        </Space>
+      )}
+    </div>
+  );
+}
+
+
+// ========================================================================
+// 创建波段 Modal
+// ========================================================================
+function CreateWaveModal({
+  open, selectedCount, loading, onCancel, onSubmit,
+}: {
+  open: boolean;
+  selectedCount: number;
+  loading: boolean;
+  onCancel: () => void;
+  onSubmit: (name: string, date: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [date, setDate] = useState("");
+
+  return (
+    <Modal
+      open={open}
+      title="➕ 创建新波段"
+      onCancel={onCancel}
+      okText="创建"
+      cancelText="取消"
+      confirmLoading={loading}
+      okButtonProps={{ disabled: !name.trim() }}
+      onOk={() => { onSubmit(name.trim(), date); setName(""); setDate(""); }}
+    >
+      <Space direction="vertical" size={12} style={{ width: "100%" }}>
+        {selectedCount > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            message={`已选的 ${selectedCount} 套 look 将直接归入新波段`}
+          />
+        )}
+        <div>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>波段名 *</div>
+          <Input
+            autoFocus
+            placeholder="如：8月第1波 / 秋季开学波"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onPressEnter={() => name.trim() && onSubmit(name.trim(), date)}
+          />
+        </div>
+        <div>
+          <div style={{ fontSize: 12, color: "#666", marginBottom: 4 }}>预备上架时间（可选）</div>
+          <Input
+            type="date"
+            value={date}
+            onChange={(e) => setDate(e.target.value)}
+            style={{ width: 180 }}
+          />
+        </div>
+      </Space>
+    </Modal>
   );
 }
 
@@ -411,10 +840,11 @@ function ImagePreview({ item }: { item: any }) {
 
 function LookCard({
   look, imageById, onDelete, onDuplicate, onSave, isSaving, onPreview, onOpenTemplatePicker,
-  selectMode = false, selected = false, onToggleSelect,
+  selectMode = false, selected = false, onToggleSelect, waveName = null,
 }: {
   look: Look;
   imageById: Map<string, any>;
+  waveName?: string | null;
   onDelete: () => void;
   onDuplicate: () => void;
   onSave: (changes: Partial<Look>) => void;
@@ -512,8 +942,8 @@ function LookCard({
         </Space>
       }
     >
-      {/* 上下装两侧 */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 8 }}>
+      {/* 上装 | 下装 | 拍摄参考 三列，槽位尺寸一致（3:4 contain） */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 8 }}>
         {/* 上装侧 —— 有图时只存文本（kind 保持 image）；缺图时文本兼作该侧内容（kind=text） */}
         <SlotView
           side="top"
@@ -534,25 +964,37 @@ function LookCard({
           isSaving={isSaving}
           onImageClick={() => bottomImage && onPreview(bottomImage)}
         />
+        {/* 拍摄参考：第三列，槽位与服装图一致 */}
+        <ShootingSlotView
+          lookId={look.id}
+          slotKind={look.shooting_slot_kind}
+          slotUrl={look.shooting_slot_url}
+          slotMeta={look.shooting_slot_meta}
+          onOpenTemplatePicker={onOpenTemplatePicker}
+          onPreview={onPreview}
+        />
       </div>
-
-      {/* 拍摄参考槽位 */}
-      <ShootingSlotView
-        lookId={look.id}
-        slotKind={look.shooting_slot_kind}
-        slotUrl={look.shooting_slot_url}
-        slotMeta={look.shooting_slot_meta}
-        onOpenTemplatePicker={onOpenTemplatePicker}
-        onPreview={onPreview}
-      />
-
-      {/* Tags 编辑 */}
-      <TagsEditor value={look.tags || []} onChange={(tags) => onSave({ tags })} />
 
       {/* 元信息 */}
-      <div style={{ marginTop: 6, fontSize: 10, color: "#bbb" }}>
-        更新 {look.updated_at}
+      <div style={{ marginTop: 6, fontSize: 10, color: "#bbb", display: "flex", alignItems: "center", gap: 6 }}>
+        {waveName && (
+          <Tag color="purple" style={{ margin: 0, fontSize: 9, lineHeight: "16px" }}>
+            🌊 {waveName}
+          </Tag>
+        )}
+        <span>更新 {look.updated_at}</span>
       </div>
+      {/* 导出记录：新格式 "已导出:YYYY-MM-DD HH:MM" → "MM-DD HH:MM 导出"；旧格式兜底 "已导出" */}
+      {(() => {
+        const t = (look.tags || []).find((x) => String(x).startsWith("已导出"));
+        if (!t) return null;
+        const ts = String(t).includes(":") ? String(t).slice(String(t).indexOf(":") + 1) : "";
+        return (
+          <div style={{ marginTop: 2, fontSize: 10, color: "#bbb" }}>
+            {ts ? `${ts.slice(5)} 导出` : "已导出"}
+          </div>
+        );
+      })()}
     </Card>
   );
 }
@@ -607,18 +1049,27 @@ function SlotView({
           onMouseEnter={(e) => { if (onImageClick) (e.currentTarget as HTMLDivElement).style.transform = "scale(1.02)"; }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.transform = ""; }}
         >
-          <img
-            src={image.image_url}
-            alt={label}
-            style={{
-              width: "100%",
-              aspectRatio: "1/1",
-              objectFit: "cover",
-              borderRadius: 4,
-              border: "1px solid #eee",
-              display: "block",
-            }}
-          />
+          {/* 槽位与选款中心一致：高4:宽3，contain 完整显示不裁切 */}
+          <div style={{
+            width: "100%",
+            aspectRatio: "3/4",
+            background: "#f5f5f5",
+            borderRadius: 4,
+            border: "1px solid #eee",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            overflow: "hidden",
+          }}>
+            <img
+              src={image.image_url}
+              alt={label}
+              style={{
+                maxWidth: "100%",
+                maxHeight: "100%",
+                objectFit: "contain",
+                display: "block",
+              }}
+            />
+          </div>
           {onImageClick && (
             <div style={{
               position: "absolute",
@@ -653,7 +1104,7 @@ function SlotView({
         </div>
         <div
           style={{
-            width: "100%", aspectRatio: "1/1", background: "#fafafa",
+            width: "100%", aspectRatio: "3/4", background: "#fafafa",
             border: "1px dashed #ddd", borderRadius: 4,
             display: "flex", alignItems: "center", justifyContent: "center",
             color: "#bbb", fontSize: 11, textAlign: "center", padding: 4,
@@ -684,21 +1135,6 @@ function SlotView({
         style={{ fontSize: 11 }}
       />
     </div>
-  );
-}
-
-
-function TagsEditor({ value, onChange }: { value: string[]; onChange: (tags: string[]) => void }) {
-  return (
-    <Select
-      mode="tags"
-      size="small"
-      style={{ width: "100%" }}
-      placeholder="加 tags（回车确认，如 主推 / 露营 / 秋冬）"
-      value={value}
-      onChange={onChange}
-      tokenSeparators={[",", " ", "，"]}
-    />
   );
 }
 
@@ -778,14 +1214,10 @@ function ShootingSlotView({
   })();
 
   return (
-    <div style={{ marginTop: 10, marginBottom: 6 }}>
-      <div style={{ fontSize: 11, color: "#666", marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
-        <span>📸 拍摄参考</span>
-        {slotKind && (
-          <Tag style={{ margin: 0, fontSize: 10 }} color={slotKind === "template" ? "geekblue" : "green"}>
-            {slotKind === "template" ? "模板库" : "上传"}
-          </Tag>
-        )}
+    <div>
+      {/* 与 上装/下装 列头保持同款式 */}
+      <div style={{ fontSize: 11, color: "#666", marginBottom: 4 }}>
+        <Tag color="purple" style={{ margin: 0, fontSize: 10 }}>📸 拍摄参考</Tag>
       </div>
 
       {/* 隐藏 file input 供空态和"换一张"复用 */}
@@ -798,11 +1230,9 @@ function ShootingSlotView({
       />
 
       {slotUrl ? (
-        // 已配置态
-        <div style={{ display: "grid", gridTemplateColumns: "80px 1fr", gap: 8, alignItems: "flex-start" }}>
-          <img
-            src={slotUrl}
-            alt="拍摄参考"
+        // 已配置态：槽位与服装图一致（3:4 contain），操作按钮放槽位下方
+        <>
+          <div
             title="点击放大"
             onClick={() => onPreview({
               image_url: slotUrl,
@@ -814,30 +1244,31 @@ function ShootingSlotView({
               image_prompt_used: null,
             })}
             style={{
-              width: 80, height: 80,
-              objectFit: "cover",
-              borderRadius: 4, border: "1px solid #eee",
+              width: "100%",
+              aspectRatio: "3/4",
+              background: "#f5f5f5",
+              borderRadius: 4,
+              border: "1px solid #eee",
+              display: "flex", alignItems: "center", justifyContent: "center",
+              overflow: "hidden",
               cursor: "zoom-in",
-              display: "block",
             }}
-            onError={(e) => { (e.target as HTMLImageElement).style.opacity = "0.3"; }}
-          />
-          <div>
-            <Space size={4} wrap style={{ marginBottom: 6 }}>
-              {shortTags.map((t, i) => (
-                <Tag key={i} style={{ margin: 0, fontSize: 10 }}>{t}</Tag>
-              ))}
-              {shortTags.length === 0 && <span style={{ fontSize: 10, color: "#bbb" }}>无标签</span>}
-            </Space>
-            <Space size={4}>
-              <Button size="small" onClick={() => fileInputRef.current?.click()}>🔄 换上传</Button>
-              <Button size="small" onClick={onOpenTemplatePicker}>📂 换模板</Button>
-              <Button size="small" danger onClick={handleClear}>× 清空</Button>
-            </Space>
+          >
+            <img
+              src={slotUrl}
+              alt="拍摄参考"
+              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block" }}
+              onError={(e) => { (e.target as HTMLImageElement).style.opacity = "0.3"; }}
+            />
           </div>
-        </div>
+          <Space size={2} wrap style={{ marginTop: 4 }}>
+            <Button size="small" style={{ fontSize: 11, padding: "0 6px" }} onClick={() => fileInputRef.current?.click()}>🔄 上传</Button>
+            <Button size="small" style={{ fontSize: 11, padding: "0 6px" }} onClick={onOpenTemplatePicker}>📂 模板</Button>
+            <Button size="small" danger style={{ fontSize: 11, padding: "0 6px" }} onClick={handleClear}>×</Button>
+          </Space>
+        </>
       ) : (
-        // 空态 — 拖拽区 + 三入口
+        // 空态 — 拖拽区（槽位同尺寸）+ 两入口
         <div
           onDragEnter={(e) => { e.preventDefault(); setIsDragging(true); }}
           onDragLeave={(e) => { e.preventDefault(); setIsDragging(false); }}
@@ -847,7 +1278,10 @@ function ShootingSlotView({
             border: `1px dashed ${isDragging ? "#1677ff" : "#d9d9d9"}`,
             background: isDragging ? "#e6f4ff" : "#fafafa",
             borderRadius: 4,
-            padding: 12,
+            width: "100%",
+            aspectRatio: "3/4",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            padding: 8,
             textAlign: "center",
             transition: "all 0.15s",
           }}
@@ -972,22 +1406,17 @@ function TemplatePickerModal({
         />
       ) : (
         <>
-          {/* 类目 tabs */}
-          <Space style={{ marginBottom: 16 }}>
-            {cats.map((c) => (
-              <Button
-                key={c}
-                size="small"
-                type={c === selectedCat ? "primary" : "default"}
-                onClick={() => setSelectedCat(c)}
-              >
-                {c}
-                <span style={{ fontSize: 10, opacity: 0.7, marginLeft: 4 }}>
-                  {c === "全部" ? data.groups?.length : data.groups?.filter((g) => g.category === c).length}
-                </span>
-              </Button>
-            ))}
-          </Space>
+          {/* 类目切换 —— 与全平台 Segmented 统一（选中蓝底白字） */}
+          <div style={{ marginBottom: 16 }}>
+            <Segmented
+              value={selectedCat}
+              onChange={(v) => setSelectedCat(String(v))}
+              options={cats.map((c) => ({
+                value: c,
+                label: `${c} ${c === "全部" ? (data.groups?.length ?? 0) : (data.groups?.filter((g) => g.category === c).length ?? 0)}`,
+              }))}
+            />
+          </div>
 
           {/* 图组列表 */}
           <div style={{ maxHeight: "70vh", overflowY: "auto" }}>

@@ -157,6 +157,7 @@ export type Look = {
   shooting_slot_kind: "upload" | "template" | null;
   shooting_slot_url: string | null;
   shooting_slot_meta: Record<string, any> | null;
+  wave_id: string | null;          // 波段归属；null = 未分波段
   created_at: string;
   updated_at: string;
 };
@@ -198,6 +199,68 @@ export const exportLooksToDesktop = (lookIds: string[]) =>
   api
     .post<LooksExportResponse>("/looks/export-to-desktop", { look_ids: lookIds })
     .then((r) => r.data);
+
+// ── 选款中心（已确认上架的 SKU 仓库）──────────────────────────
+export type SelectionStyle = {
+  id: string;
+  image_id: string;                    // generated: task:plan；uploaded: upload:{uuid}
+  source_kind: "generated" | "uploaded";
+  category: "top" | "bottom" | null;
+  style_no: string | null;
+  color_code: string | null;
+  color_name: string | null;
+  note: string | null;
+  origin: string;                      // 手动选款 | 存量迁移 | 成套联动 | 上传
+  upload_url: string | null;
+  created_at: string;
+};
+export const listSelection = () =>
+  api.get<SelectionStyle[]>("/selection").then((r) => r.data);
+export const listSelectionImageIds = () =>
+  api.get<{ image_ids: string[] }>("/selection/image-ids").then((r) => r.data.image_ids);
+export const addSelection = (items: Array<{
+  image_id: string; category?: string | null;
+  style_no?: string | null; color_code?: string | null; color_name?: string | null;
+}>) => api.post("/selection", { items }).then((r) => r.data);
+export const uploadSelection = (
+  file: File,
+  meta: { category: "top" | "bottom"; style_no: string; color_name?: string; note?: string },
+) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("category", meta.category);
+  fd.append("style_no", meta.style_no);
+  if (meta.color_name) fd.append("color_name", meta.color_name);
+  if (meta.note) fd.append("note", meta.note);
+  return api.post<SelectionStyle>("/selection/upload", fd).then((r) => r.data);
+};
+export const removeSelection = (id: string) =>
+  api.delete(`/selection/${id}`).then((r) => r.data);
+
+// ── 波段上新管理 ──────────────────────────────────────────────
+export type Wave = {
+  id: string;
+  name: string;
+  planned_launch_date: string | null;   // YYYY-MM-DD
+  status: string;                       // 规划中 | 已上架
+  created_at: string;
+  updated_at: string;
+  look_count: number;
+  style_count: number;                  // 波段内款色图去重数
+};
+export const listWaves = () => api.get<Wave[]>("/waves").then((r) => r.data);
+export const createWave = (payload: {
+  name: string; planned_launch_date?: string | null; look_ids?: string[];
+}) => api.post<Wave>("/waves", payload).then((r) => r.data);
+export const updateWave = (id: string, payload: {
+  name?: string; planned_launch_date?: string; status?: string;
+}) => api.patch<Wave>(`/waves/${id}`, payload).then((r) => r.data);
+export const deleteWave = (id: string) =>
+  api.delete(`/waves/${id}`).then((r) => r.data);
+export const assignLooksToWave = (waveId: string, lookIds: string[]) =>
+  api.post(`/waves/${waveId}/looks`, { look_ids: lookIds }).then((r) => r.data);
+export const unassignLooksFromWave = (lookIds: string[]) =>
+  api.post("/waves/unassign", { look_ids: lookIds }).then((r) => r.data);
 
 // 上装 / 下装归类
 export const listImageCategories = () =>

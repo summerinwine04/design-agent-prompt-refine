@@ -14,6 +14,7 @@ import TaskDetailPage from "./routes/TaskDetailPage";
 import TasksComparePage from "./routes/TasksComparePage";
 import TasksGalleryPage from "./routes/TasksGalleryPage";
 import FittingRoomPage from "./routes/FittingRoomPage";
+import SelectionCenterPage from "./routes/SelectionCenterPage";
 import FixturesPage from "./routes/FixturesPage";
 import BillingPage from "./routes/BillingPage";
 
@@ -23,15 +24,16 @@ const NAV_ITEMS = [
   { key: "/", label: <Link to="/">工作台</Link> },
   { key: "/compare", label: <Link to="/compare">对比 Runs</Link> },
   { key: "/tasks", label: <Link to="/tasks">生图任务</Link> },
+  { key: "/selection", label: <Link to="/selection">🛒 选款中心</Link> },
   { key: "/fitting-room", label: <Link to="/fitting-room">👗 Fitting Room</Link> },
-  { key: "/billing", label: <Link to="/billing">💰 账单</Link> },
   { key: "/prompts", label: <Link to="/prompts">Prompt 版本</Link> },
   { key: "/fixtures", label: <Link to="/fixtures">测试夹具</Link> },
   { key: "/settings", label: <Link to="/settings">设置</Link> },
+  { key: "/billing", label: <Link to="/billing">💰 账单</Link> },
 ];
 
 // 访客模式下可见的导航（其余页面的 API 会被公网守卫 403）
-const GUEST_NAV_KEYS = new Set(["/tasks", "/fitting-room", "/billing"]);
+const GUEST_NAV_KEYS = new Set(["/tasks", "/selection", "/fitting-room", "/billing"]);
 
 export default function App() {
   const location = useLocation();
@@ -66,6 +68,7 @@ export default function App() {
           <Route path="/tasks/compare" element={<TasksComparePage />} />
           <Route path="/tasks/gallery" element={<TasksGalleryPage />} />
           <Route path="/billing" element={<BillingPage />} />
+          <Route path="/selection" element={<SelectionCenterPage />} />
           <Route path="/fitting-room" element={<FittingRoomPage />} />
           <Route path="/tasks/:taskId" element={<TaskDetailPage />} />
           <Route path="/prompts" element={<PromptsPage />} />

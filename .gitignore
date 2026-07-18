@@ -14,6 +14,7 @@ frontend/.vite/
 # Local data
 data/metadata.db
 data/task_images/
+data/selection_uploads/
 runs/
 
 # Logs

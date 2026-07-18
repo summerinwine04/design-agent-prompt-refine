@@ -1,42 +1,78 @@
 /**
- * PatternLibraryPickerModal —— v6 图库输入源专用选图 Modal
- * (cache-bust: stale client.js removed 2026-07-12)
+ * PatternLibraryPickerModal —— 图库输入源选图 Modal
  *
- * 两步式流程：
- *   Step 1: 显示所有方向文件夹（可按母主题过滤），点选一个文件夹
- *   Step 2: 在选定文件夹里勾 1-3 张作为核心参考图（硬上限 3）
- *
- * 返回给 InputsPanel：{ folder_name: string, selected_files: string[] (1-3 张) }
+ * 两种模式：
+ *   单文件夹模式（v6，强单主题/成套 CONVERGE 用）：
+ *     Step 1: 选一个方向文件夹 → Step 2: 勾 ≥1 张核心参考图（不设上限）
+ *     确认回调 onConfirm(folder_name, selected_files)
+ *   多文件夹模式（v7，多主题 × 图库 用，multiFolder=true）：
+ *     购物车式：可进出多个文件夹，各勾任意张（每个入选文件夹 = 一个设计方向）
+ *     确认回调 onConfirmMulti(selections: [{folder, files}])
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Alert, Button, Empty, Image, Modal, Segmented, Space, Spin, Tag } from "antd";
 import { useQuery } from "@tanstack/react-query";
 
 import { listPatternLibrary, PatternLibraryGroup } from "../../api/client";
 
+export type PatternLibrarySelection = { folder: string; files: string[] };
+
 type Props = {
   open: boolean;
   onCancel: () => void;
-  onConfirm: (folder_name: string, selected_files: string[]) => void;
-  // 初始状态（编辑已有选择时传入）
+  // —— 单文件夹模式（multiFolder 不传 / false）——
+  onConfirm?: (folder_name: string, selected_files: string[]) => void;
   initialFolder?: string;
   initialFiles?: string[];
+  // —— v7 多文件夹模式 ——
+  multiFolder?: boolean;
+  onConfirmMulti?: (selections: PatternLibrarySelection[]) => void;
+  initialSelections?: PatternLibrarySelection[];
 };
-
-const MAX_PICK = 3;
 
 export default function PatternLibraryPickerModal({
   open, onCancel, onConfirm, initialFolder, initialFiles,
+  multiFolder = false, onConfirmMulti, initialSelections,
 }: Props) {
   // step: 0 = 选文件夹；1 = 勾图
-  const [step, setStep] = useState<0 | 1>(initialFolder ? 1 : 0);
+  const [step, setStep] = useState<0 | 1>(!multiFolder && initialFolder ? 1 : 0);
+  // 当前正在浏览的文件夹（两种模式共用）
   const [pickedFolder, setPickedFolder] = useState<string>(initialFolder || "");
-  const [pickedFiles, setPickedFiles] = useState<Set<string>>(new Set(initialFiles || []));
+  // 购物车：folder → 勾选的文件名集合（单文件夹模式下只会有一个 key）
+  const [cart, setCart] = useState<Map<string, Set<string>>>(() => {
+    const m = new Map<string, Set<string>>();
+    if (multiFolder && initialSelections) {
+      for (const s of initialSelections) m.set(s.folder, new Set(s.files));
+    } else if (initialFolder && initialFiles?.length) {
+      m.set(initialFolder, new Set(initialFiles));
+    }
+    return m;
+  });
   // 母主题过滤 tab
   const [categoryFilter, setCategoryFilter] = useState<string>("全部");
   // 放大预览
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+
+  // 每次打开都按当前模式从「外部已确认的选择」同步——
+  // 单实例 Modal 被多主题（多文件夹）/ 收敛（单文件夹）两种模式复用，
+  // 若只在购物车为空时恢复，跨模式开关后会显示陈旧内容（看起来像选择被清了）。
+  // 取消不确认 = 丢弃本次改动，回到上次确认的状态（标准语义）。
+  useEffect(() => {
+    if (!open) return;
+    const m = new Map<string, Set<string>>();
+    if (multiFolder) {
+      for (const s of initialSelections || []) m.set(s.folder, new Set(s.files));
+      setStep(0);
+      setPickedFolder("");
+    } else {
+      if (initialFolder && initialFiles?.length) m.set(initialFolder, new Set(initialFiles));
+      setPickedFolder(initialFolder || "");
+      setStep(initialFolder ? 1 : 0);
+    }
+    setCart(m);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, multiFolder]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["pattern-library"],
@@ -57,12 +93,26 @@ export default function PatternLibraryPickerModal({
     [groups, pickedFolder],
   );
 
-  const canConfirm = pickedFolder && pickedFiles.size >= 1 && pickedFiles.size <= MAX_PICK;
+  const activeFiles: Set<string> = cart.get(pickedFolder) || new Set();
+
+  // 汇总：入选的文件夹（≥1 张）
+  const selections: PatternLibrarySelection[] = useMemo(() => {
+    const out: PatternLibrarySelection[] = [];
+    for (const [folder, files] of cart.entries()) {
+      if (files.size > 0) out.push({ folder, files: Array.from(files) });
+    }
+    return out;
+  }, [cart]);
+  const totalPicked = selections.reduce((n, s) => n + s.files.length, 0);
+
+  const canConfirm = multiFolder
+    ? selections.length >= 1
+    : !!pickedFolder && activeFiles.size >= 1;
 
   const handleReset = () => {
     setStep(0);
     setPickedFolder("");
-    setPickedFiles(new Set());
+    setCart(new Map());
     setCategoryFilter("全部");
   };
 
@@ -73,21 +123,45 @@ export default function PatternLibraryPickerModal({
 
   const handleConfirm = () => {
     if (!canConfirm) return;
-    onConfirm(pickedFolder, Array.from(pickedFiles));
+    if (multiFolder) {
+      onConfirmMulti?.(selections);
+    } else {
+      onConfirm?.(pickedFolder, Array.from(activeFiles));
+    }
+  };
+
+  const enterFolder = (folder: string) => {
+    if (!multiFolder && pickedFolder && folder !== pickedFolder) {
+      // 单文件夹模式：换文件夹 = 丢弃旧文件夹的勾选
+      setCart(new Map());
+    }
+    setPickedFolder(folder);
+    setStep(1);
   };
 
   const togglePickFile = (fn: string) => {
-    setPickedFiles((prev) => {
-      const next = new Set(prev);
-      if (next.has(fn)) {
-        next.delete(fn);
-      } else {
-        if (next.size >= MAX_PICK) {
-          // 达到上限：不添加
-          return prev;
-        }
-        next.add(fn);
-      }
+    setCart((prev) => {
+      const next = new Map(prev);
+      const files = new Set(next.get(pickedFolder) || []);
+      if (files.has(fn)) files.delete(fn); else files.add(fn);
+      next.set(pickedFolder, files);
+      return next;
+    });
+  };
+
+  const pickAllInFolder = () => {
+    if (!activeGroup) return;
+    setCart((prev) => {
+      const next = new Map(prev);
+      next.set(pickedFolder, new Set(activeGroup.images.map((i) => i.filename)));
+      return next;
+    });
+  };
+
+  const clearFolder = () => {
+    setCart((prev) => {
+      const next = new Map(prev);
+      next.delete(pickedFolder);
       return next;
     });
   };
@@ -100,6 +174,7 @@ export default function PatternLibraryPickerModal({
       title={
         <Space>
           🖼 印花图案库选图
+          {multiFolder && <Tag color="purple" style={{ margin: 0 }}>多方向模式：每个文件夹 = 一个设计方向</Tag>}
           {data?.meta && (
             <span style={{ fontSize: 12, color: "#999" }}>
               {data.meta.group_count} 组 · {data.meta.image_count} 张
@@ -114,11 +189,17 @@ export default function PatternLibraryPickerModal({
               <>
                 <Button size="small" onClick={() => { setStep(0); }}>← 返回选文件夹</Button>
                 <span style={{ fontSize: 12, color: "#666" }}>
-                  已选 <strong style={{ color: pickedFiles.size > 0 ? "#1677ff" : "#999" }}>
-                    {pickedFiles.size}/{MAX_PICK}
+                  本夹已勾 <strong style={{ color: activeFiles.size > 0 ? "#1677ff" : "#999" }}>
+                    {activeFiles.size}
                   </strong> 张
                 </span>
               </>
+            )}
+            {multiFolder && (
+              <span style={{ fontSize: 12, color: "#666" }}>
+                共 <strong style={{ color: selections.length > 0 ? "#722ed1" : "#999" }}>{selections.length}</strong> 个方向
+                · <strong>{totalPicked}</strong> 张
+              </span>
             )}
           </Space>
           <Space>
@@ -129,7 +210,9 @@ export default function PatternLibraryPickerModal({
               disabled={!canConfirm}
               onClick={handleConfirm}
             >
-              选定并返回 {canConfirm && `(${pickedFiles.size} 张)`}
+              {multiFolder
+                ? `选定并返回${canConfirm ? ` (${selections.length} 方向 ${totalPicked} 张)` : ""}`
+                : `选定并返回${canConfirm ? ` (${activeFiles.size} 张)` : ""}`}
             </Button>
           </Space>
         </Space>
@@ -169,48 +252,60 @@ export default function PatternLibraryPickerModal({
                 padding: 2,
               }}
             >
-              {filteredGroups.map((g) => (
-                <div
-                  key={g.folder_name}
-                  onClick={() => { setPickedFolder(g.folder_name); setStep(1); }}
-                  style={{
-                    border: "1px solid #eee",
-                    borderRadius: 6,
-                    padding: 8,
-                    cursor: "pointer",
-                    transition: "border-color 0.15s, box-shadow 0.15s",
-                  }}
-                  onMouseEnter={(e) => {
-                    (e.currentTarget as HTMLDivElement).style.borderColor = "#1677ff";
-                    (e.currentTarget as HTMLDivElement).style.boxShadow = "0 2px 8px rgba(22,119,255,0.15)";
-                  }}
-                  onMouseLeave={(e) => {
-                    (e.currentTarget as HTMLDivElement).style.borderColor = "#eee";
-                    (e.currentTarget as HTMLDivElement).style.boxShadow = "";
-                  }}
-                >
-                  <div style={{
-                    width: "100%",
-                    aspectRatio: "1/1",
-                    background: "#fafafa",
-                    borderRadius: 4,
-                    overflow: "hidden",
-                    marginBottom: 6,
-                  }}>
-                    <img
-                      src={g.cover_url}
-                      alt={g.folder_name}
-                      loading="lazy"
-                      style={{ width: "100%", height: "100%", objectFit: "cover" }}
-                    />
+              {filteredGroups.map((g) => {
+                const nPicked = cart.get(g.folder_name)?.size || 0;
+                return (
+                  <div
+                    key={g.folder_name}
+                    onClick={() => enterFolder(g.folder_name)}
+                    style={{
+                      border: nPicked > 0 ? "2px solid #722ed1" : "1px solid #eee",
+                      borderRadius: 6,
+                      padding: 8,
+                      cursor: "pointer",
+                      transition: "border-color 0.15s, box-shadow 0.15s",
+                      position: "relative",
+                    }}
+                    onMouseEnter={(e) => {
+                      (e.currentTarget as HTMLDivElement).style.boxShadow = "0 2px 8px rgba(22,119,255,0.15)";
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLDivElement).style.boxShadow = "";
+                    }}
+                  >
+                    {nPicked > 0 && (
+                      <div style={{
+                        position: "absolute", top: 4, right: 4, zIndex: 2,
+                        background: "#722ed1", color: "#fff",
+                        fontSize: 11, fontWeight: 600,
+                        padding: "1px 8px", borderRadius: 10,
+                      }}>
+                        已选 {nPicked}
+                      </div>
+                    )}
+                    <div style={{
+                      width: "100%",
+                      aspectRatio: "1/1",
+                      background: "#fafafa",
+                      borderRadius: 4,
+                      overflow: "hidden",
+                      marginBottom: 6,
+                    }}>
+                      <img
+                        src={g.cover_url}
+                        alt={g.folder_name}
+                        loading="lazy"
+                        style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                      />
+                    </div>
+                    <div style={{ fontSize: 12, fontWeight: 600 }}>{g.sub_topic}</div>
+                    <div style={{ fontSize: 10, color: "#999", marginTop: 2 }}>
+                      <Tag style={{ margin: 0, marginRight: 4 }}>{g.parent_topic}</Tag>
+                      {g.image_count} 图
+                    </div>
                   </div>
-                  <div style={{ fontSize: 12, fontWeight: 600 }}>{g.sub_topic}</div>
-                  <div style={{ fontSize: 10, color: "#999", marginTop: 2 }}>
-                    <Tag style={{ margin: 0, marginRight: 4 }}>{g.parent_topic}</Tag>
-                    {g.image_count} 图
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </>
@@ -218,11 +313,13 @@ export default function PatternLibraryPickerModal({
         <>
           <div style={{ marginBottom: 12, fontSize: 13 }}>
             <Space>
-              <span>已选文件夹：</span>
-              <Tag color="blue">{activeGroup?.sub_topic || pickedFolder}</Tag>
+              <span>{multiFolder ? "当前方向：" : "已选文件夹："}</span>
+              <Tag color={multiFolder ? "purple" : "blue"}>{activeGroup?.sub_topic || pickedFolder}</Tag>
               <span style={{ color: "#999", fontSize: 12 }}>
-                共 {activeGroup?.image_count || 0} 张，勾 1-3 张作为核心参考图
+                共 {activeGroup?.image_count || 0} 张，勾 ≥1 张{multiFolder ? "（该文件夹即成为一个设计方向）" : "作为核心参考图"}
               </span>
+              <Button size="small" onClick={pickAllInFolder}>全选本夹</Button>
+              {activeFiles.size > 0 && <Button size="small" onClick={clearFolder}>清空本夹</Button>}
             </Space>
           </div>
           {!activeGroup || activeGroup.images.length === 0 ? (
@@ -239,19 +336,17 @@ export default function PatternLibraryPickerModal({
               }}
             >
               {activeGroup.images.map((img) => {
-                const picked = pickedFiles.has(img.filename);
-                const disabled = !picked && pickedFiles.size >= MAX_PICK;
+                const picked = activeFiles.has(img.filename);
                 return (
                   <div
                     key={img.filename}
-                    onClick={() => { if (!disabled) togglePickFile(img.filename); }}
+                    onClick={() => togglePickFile(img.filename)}
                     style={{
                       position: "relative",
                       border: picked ? "3px solid #1677ff" : "1px solid #eee",
                       borderRadius: 4,
                       overflow: "hidden",
-                      cursor: disabled ? "not-allowed" : "pointer",
-                      opacity: disabled ? 0.5 : 1,
+                      cursor: "pointer",
                       background: "#fafafa",
                       aspectRatio: "1/1",
                     }}

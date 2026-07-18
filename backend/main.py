@@ -40,11 +40,13 @@ from backend.routers import (
     pattern_library as pattern_library_router,
     prompts,
     runs,
+    selection,
     settings,
     styles,
     tasks,
     templates as templates_router,
     trends,
+    waves,
 )
 
 
@@ -106,6 +108,8 @@ app.include_router(looks.img_cat_router, prefix="/api/v1/image-categories", tags
 app.include_router(templates_router.router, prefix="/api/v1/templates", tags=["templates"])              # 视觉模板库读取
 app.include_router(pattern_library_router.router, prefix="/api/v1/pattern-library", tags=["pattern-library"])  # 印花图案库读取（Collection 图库输入源）
 app.include_router(billing.router,  prefix="/api/v1/billing",  tags=["billing"])                          # 账单：token/成本统计
+app.include_router(waves.router,    prefix="/api/v1/waves",    tags=["waves"])                            # 波段上新管理（guest 只读）
+app.include_router(selection.router, prefix="/api/v1/selection", tags=["selection"])                      # 选款中心（guest 只读）
 app.include_router(templates_router.look_slot_router, prefix="/api/v1/looks/{look_id}/shooting-slot", tags=["shooting-slot"])  # look 拍摄槽位
 
 
@@ -115,6 +119,14 @@ app.mount(
     "/static/runs",
     StaticFiles(directory=str(ROOT / "runs"), check_dir=False),
     name="runs-static",
+)
+
+# 选款中心：用户上传的款式图
+(ROOT / "data" / "selection_uploads").mkdir(parents=True, exist_ok=True)
+app.mount(
+    "/static/selection-uploads",
+    StaticFiles(directory=str(ROOT / "data" / "selection_uploads"), check_dir=False),
+    name="selection-uploads-static",
 )
 
 # M6 静态资源：生图任务的图片 + 款图 + 趋势报告页图

@@ -5,7 +5,7 @@ import { Link, useSearchParams } from "react-router-dom";
 
 import { listTrends, listStyles, listFixtures, listRuns, getStyle, createFixture, uploadTrend, subscribeTrendImport } from "../../api/client";
 import { useRunStore } from "../../store/runStore";
-import PatternLibraryPickerModal from "../PatternLibraryPickerModal/PatternLibraryPickerModal";
+import PatternLibraryPickerModal, { PatternLibrarySelection } from "../PatternLibraryPickerModal/PatternLibraryPickerModal";
 
 
 const STATUS_COLOR: Record<string, string> = {
@@ -76,9 +76,11 @@ export default function InputsPanel() {
   const [designMode, setDesignMode] = useState<string>("MULTI_TOPIC");
   // v6 输入源：Mode B / Mode C 支持从图库文件夹进（跳过 2.4s 主题选择）；Mode A 只支持 trend_report
   const [inputSource, setInputSource] = useState<"trend_report" | "pattern_library">("trend_report");
-  // 图库输入源：用户在 PatternLibraryPickerModal 里选好的文件夹 + 1-3 张核心参考图
+  // 图库输入源（v6 单文件夹，Mode B/C 用）：文件夹 + 核心参考图
   const [patternLibraryPath, setPatternLibraryPath] = useState<string>("");
   const [patternLibrarySelectedFiles, setPatternLibrarySelectedFiles] = useState<string[]>([]);
+  // 图库输入源（v7 多文件夹，Mode A 用）：每个文件夹 = 一个设计方向
+  const [patternLibrarySelections, setPatternLibrarySelections] = useState<PatternLibrarySelection[]>([]);
   const [patternLibraryPickerOpen, setPatternLibraryPickerOpen] = useState<boolean>(false);
   // Mode C：用户预选的 look 配对。file = 色号图文件名（唯一标识，后端按它精确匹配——
   // 色号 code 可能重复：同一照片编号对应多个颜色），code/name 仅作展示。
@@ -101,21 +103,37 @@ export default function InputsPanel() {
     enabled: !!currentStyleNo && designMode !== "COLLECTION_2SKU",
   });
 
-  // Mode A 只支持趋势报告输入源；切回 Mode A 时强制 input_source=trend_report
+  // v7：三种模式都支持图库输入源。Mode A 用多文件夹选择（每夹=一方向），
+  // Mode B/C 用单文件夹选择（核心参考图）。切模式时把已选图案接续过去（只在目标侧为空时播种，
+  // 不覆盖用户在目标模式下已做过的选择）：多方向 → 取第 1 个方向作单文件夹；单文件夹 → 变成 1 个方向。
   useEffect(() => {
-    if (designMode === "MULTI_TOPIC" && inputSource !== "trend_report") {
-      setInputSource("trend_report");
-      setPatternLibraryPath("");
-      setPatternLibrarySelectedFiles([]);
+    if (inputSource !== "pattern_library") return;
+    if (designMode === "MULTI_TOPIC") {
+      if (patternLibrarySelections.length === 0 && patternLibraryPath && patternLibrarySelectedFiles.length > 0) {
+        setPatternLibrarySelections([{ folder: patternLibraryPath, files: patternLibrarySelectedFiles }]);
+      }
+    } else {
+      if (!patternLibraryPath && patternLibrarySelections.length > 0) {
+        setPatternLibraryPath(patternLibrarySelections[0].folder);
+        setPatternLibrarySelectedFiles(patternLibrarySelections[0].files);
+      }
     }
-  }, [designMode, inputSource]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [designMode]);
   // 切换款号时重置色号子集选择（回到"全部设计"）；应用夹具恢复选色时跳过一次
+  const prevStyleNoRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (skipColorResetRef.current) {
       skipColorResetRef.current = false;
+      prevStyleNoRef.current = currentStyleNo;
       return;
     }
-    setPickedColors(null);
+    // 字段卸载（切设计模式）时 watch 会闪 undefined —— 不算换款号，别清选色
+    if (!currentStyleNo) return;
+    if (prevStyleNoRef.current && prevStyleNoRef.current !== currentStyleNo) {
+      setPickedColors(null);
+    }
+    prevStyleNoRef.current = currentStyleNo;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentStyleNo]);
 
@@ -223,6 +241,18 @@ export default function InputsPanel() {
     // 恢复色号子集（skip 标志防止 style_no 变化的 effect 把它清掉）
     skipColorResetRef.current = true;
     setPickedColors(fixture.selected_colors?.length ? fixture.selected_colors : null);
+    // 恢复图库输入源（v6 单文件夹 / v7 多文件夹）
+    const src = fixture.input_source === "pattern_library" ? "pattern_library" : "trend_report";
+    setInputSource(src);
+    if (src === "pattern_library") {
+      setPatternLibraryPath(fixture.pattern_library_path || "");
+      setPatternLibrarySelectedFiles(fixture.pattern_library_selected_files || []);
+      setPatternLibrarySelections(fixture.pattern_library_selections || []);
+    } else {
+      setPatternLibraryPath("");
+      setPatternLibrarySelectedFiles([]);
+      setPatternLibrarySelections([]);
+    }
     message.success(`已应用夹具：${fixture.name}`);
   };
 
@@ -267,9 +297,15 @@ export default function InputsPanel() {
         ? [...trendField, "top_style_no", "bottom_style_no", "num_designs_k", "gender_ratio_str"]
         : [...trendField, "style_no", "num_designs_k", "gender_ratio_str"];
       await form.validateFields(fieldsToCheck);
-      if (inputSource === "pattern_library" && patternLibrarySelectedFiles.length === 0) {
-        message.warning("图库输入源请先选文件夹 + 勾 1-3 张核心参考图");
-        return;
+      if (inputSource === "pattern_library") {
+        if (designMode === "MULTI_TOPIC" && patternLibrarySelections.length === 0) {
+          message.warning("图库输入源请先选至少 1 个方向文件夹并勾图");
+          return;
+        }
+        if (designMode !== "MULTI_TOPIC" && patternLibrarySelectedFiles.length === 0) {
+          message.warning("图库输入源请先选文件夹 + 勾核心参考图");
+          return;
+        }
       }
       if (designMode === "COLLECTION_2SKU" && collectionLooks.length === 0) {
         message.warning("成套模式请先配至少 1 套 look 再保存夹具");
@@ -335,12 +371,15 @@ export default function InputsPanel() {
         color_folder: styleOpt.color_folder,
         gender_ratio: genderRatio,
         num_designs_k: values.num_designs_k,
-        // v6 图库输入源
+        // 图库输入源（v6 单文件夹 / v7 多文件夹）
         design_mode: designMode,
         input_source: inputSource,
-        pattern_library_path: inputSource === "pattern_library" ? patternLibraryPath : null,
+        pattern_library_path:
+          inputSource === "pattern_library" && designMode !== "MULTI_TOPIC" ? patternLibraryPath : null,
         pattern_library_selected_files:
-          inputSource === "pattern_library" ? patternLibrarySelectedFiles : null,
+          inputSource === "pattern_library" && designMode !== "MULTI_TOPIC" ? patternLibrarySelectedFiles : null,
+        pattern_library_selections:
+          inputSource === "pattern_library" && designMode === "MULTI_TOPIC" ? patternLibrarySelections : null,
         selected_colors:
           pickedColors !== null && pickedColors.length < (currentStyleDetail?.colors?.length ?? 0)
             ? pickedColors : null,
@@ -433,8 +472,20 @@ export default function InputsPanel() {
           message.warning("请至少配一套 look（上装色 × 下装色）");
           return;
         }
+        // v6 缺口补齐：Mode C 图库输入源校验 + payload
+        if (inputSource === "pattern_library") {
+          if (!patternLibraryPath || patternLibrarySelectedFiles.length === 0) {
+            message.warning("图库输入源请先选文件夹并勾核心参考图");
+            return;
+          }
+        }
         startRun({
-          trend_json_path: values.trend_json_path,
+          trend_json_path: inputSource === "trend_report" ? values.trend_json_path : undefined,
+          ...(inputSource === "pattern_library" ? {
+            input_source: "pattern_library",
+            pattern_library_path: patternLibraryPath,
+            pattern_library_selected_files: patternLibrarySelectedFiles,
+          } : {}),
           ref_image_path: topOpt.ref_image,        // primary 兜底字段
           color_folder: topOpt.color_folder,
           design_mode: "COLLECTION_2SKU",
@@ -464,15 +515,22 @@ export default function InputsPanel() {
         message.warning("至少选择 1 个色号参与设计");
         return;
       }
-      // v6 图库输入源前置校验
+      // 图库输入源前置校验：Mode A 多文件夹 / Mode B 单文件夹
       if (inputSource === "pattern_library") {
-        if (!patternLibraryPath) {
-          message.warning("请选择图库文件夹");
-          return;
-        }
-        if (patternLibrarySelectedFiles.length === 0) {
-          message.warning("请从图库中勾选 1-3 张核心参考图");
-          return;
+        if (designMode === "MULTI_TOPIC") {
+          if (patternLibrarySelections.length === 0) {
+            message.warning("请从图库中选至少 1 个方向文件夹并勾图");
+            return;
+          }
+        } else {
+          if (!patternLibraryPath) {
+            message.warning("请选择图库文件夹");
+            return;
+          }
+          if (patternLibrarySelectedFiles.length === 0) {
+            message.warning("请从图库中勾选至少 1 张核心参考图");
+            return;
+          }
         }
       }
       const totalColors = currentStyleDetail?.colors?.length ?? 0;
@@ -494,11 +552,16 @@ export default function InputsPanel() {
       if (designMode === "SINGLE_TOPIC_STRONG") {
         payload.design_mode = "SINGLE_TOPIC_STRONG";
       }
-      // v6：图库输入源塞进 payload（图库模式下无论 design_mode 都必须带）
+      // 图库输入源塞进 payload（图库模式下无论 design_mode 都必须带）
       if (inputSource === "pattern_library") {
         payload.input_source = "pattern_library";
-        payload.pattern_library_path = patternLibraryPath;
-        payload.pattern_library_selected_files = patternLibrarySelectedFiles;
+        if (designMode === "MULTI_TOPIC") {
+          // v7：多文件夹 → 每夹一个设计方向
+          payload.pattern_library_selections = patternLibrarySelections;
+        } else {
+          payload.pattern_library_path = patternLibraryPath;
+          payload.pattern_library_selected_files = patternLibrarySelectedFiles;
+        }
       }
       startRun(payload);
     }).catch(() => {
@@ -526,7 +589,31 @@ export default function InputsPanel() {
             size="small"
             value={designMode}
             disabled={isRunning}
-            onChange={(v) => setDesignMode(String(v))}
+            onChange={(v) => {
+              // 切模式前快照全部表单值（含被卸载字段），切完回填——
+              // 否则条件渲染的 Form.Item 卸载会把 款号/趋势报告 等选择丢掉
+              const next = String(v);
+              const snap = form.getFieldsValue(true);
+              setDesignMode(next);
+              setTimeout(() => {
+                form.setFieldsValue(snap);
+                // 款号跨模式接续（只在目标侧为空时播种，不覆盖已有选择）：
+                //   A/B → C：款号按名称含「裤」猜下装槽，否则上装槽
+                //   C → A/B：取上装款号（无则下装）作单款款号
+                if (next === "COLLECTION_2SKU") {
+                  if (!snap.top_style_no && !snap.bottom_style_no && snap.style_no) {
+                    const isBottom = /裤/.test(String(snap.style_no));
+                    form.setFieldsValue(
+                      isBottom
+                        ? { bottom_style_no: snap.style_no }
+                        : { top_style_no: snap.style_no },
+                    );
+                  }
+                } else if (!snap.style_no && (snap.top_style_no || snap.bottom_style_no)) {
+                  form.setFieldsValue({ style_no: snap.top_style_no || snap.bottom_style_no });
+                }
+              }, 0);
+            }}
             options={[
               { label: "🎨 多主题", value: "MULTI_TOPIC" },
               { label: "🧬 强单主题", value: "SINGLE_TOPIC_STRONG" },
@@ -540,12 +627,14 @@ export default function InputsPanel() {
           </div>
         </div>
 
-        {/* v6 输入源：仅 Mode B / Mode C 显示，Mode A 隐藏（强制 trend_report） */}
-        {designMode !== "MULTI_TOPIC" && (
+        {/* 输入源：三种模式都支持（v7）。Mode A = 多文件夹（每夹一方向）；Mode B/C = 单文件夹（核心参考图） */}
+        {(
           <div style={{ marginBottom: 12 }}>
             <div style={{ fontSize: 12, marginBottom: 4, color: "#666" }}>
               输入源
-              <Tooltip title="图库输入：从「印花图案库」选一个方向文件夹 + 勾 1-3 张核心参考图 → 直接跳过主题选择，进 blueprint。图库模式下 blueprint 会看着这几张图抽象母图案 DNA">
+              <Tooltip title={designMode === "MULTI_TOPIC"
+                ? "图库输入：从「印花图案库」跨文件夹选图，每个入选文件夹自动成为一个设计方向（替代趋势报告的主题选择），方向名 = 文件夹名"
+                : "图库输入：从「印花图案库」选一个方向文件夹 + 勾几张核心参考图 → 直接跳过主题选择，进 blueprint。图库模式下 blueprint 会看着这几张图抽象母图案 DNA"}>
                 <span style={{ marginLeft: 4, color: "#999", cursor: "help" }}>?</span>
               </Tooltip>
             </div>
@@ -588,15 +677,53 @@ export default function InputsPanel() {
             </Form.Item>
           )}
 
-          {/* 图库文件夹 —— 仅 pattern_library 输入源显示 */}
-          {inputSource === "pattern_library" && (
+          {/* 图库选图 —— 仅 pattern_library 输入源显示；Mode A 多文件夹 / Mode B、C 单文件夹 */}
+          {inputSource === "pattern_library" && designMode === "MULTI_TOPIC" && (
+            <Form.Item
+              label={
+                <Space size={4}>
+                  <span>图库方向选图</span>
+                  <Tooltip title="每个入选文件夹 = 一个设计方向，方向名 = 文件夹名">
+                    <span style={{ color: "#999", cursor: "help", fontWeight: 400 }}>?</span>
+                  </Tooltip>
+                </Space>
+              }
+              required
+              help={
+                patternLibrarySelections.length > 0
+                  ? `已选 ${patternLibrarySelections.length} 个方向 · 共 ${patternLibrarySelections.reduce((n, s) => n + s.files.length, 0)} 张`
+                  : "点按钮从图库跨文件夹选图，每夹一个方向"
+              }
+              validateStatus={patternLibrarySelections.length === 0 ? "warning" : "success"}
+            >
+              <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                <Button
+                  onClick={() => setPatternLibraryPickerOpen(true)}
+                  disabled={isRunning}
+                  type={patternLibrarySelections.length === 0 ? "primary" : "default"}
+                >
+                  🖼 {patternLibrarySelections.length === 0 ? "选图库方向" : "改选图库方向"}
+                </Button>
+                {patternLibrarySelections.length > 0 && (
+                  <Space size={4} wrap>
+                    {patternLibrarySelections.map((s) => (
+                      <Tag key={s.folder} color="purple" style={{ margin: 0 }}>
+                        {s.folder.split(/[/\\]/).pop() || s.folder} · {s.files.length} 张
+                      </Tag>
+                    ))}
+                  </Space>
+                )}
+              </Space>
+            </Form.Item>
+          )}
+          {inputSource === "pattern_library" && designMode !== "MULTI_TOPIC" && (
             <Form.Item
               label="图库文件夹 + 核心参考图"
               required
               help={
                 patternLibrarySelectedFiles.length > 0
                   ? `已选「${patternLibraryPath.split(/[/\\]/).pop() || patternLibraryPath}」的 ${patternLibrarySelectedFiles.length} 张作为核心参考`
-                  : "点右侧按钮从图库中选一个方向文件夹 + 勾 1-3 张图作为母图案 blueprint 的视觉证据"
+                  : "点右侧按钮从图库中选一个方向文件夹 + 勾几张图作为母图案 blueprint 的视觉证据"
               }
               validateStatus={patternLibrarySelectedFiles.length === 0 ? "warning" : "success"}
             >
@@ -610,7 +737,7 @@ export default function InputsPanel() {
                 </Button>
                 {patternLibrarySelectedFiles.length > 0 && (
                   <span style={{ fontSize: 12, color: "#52c41a" }}>
-                    ✓ {patternLibrarySelectedFiles.length}/3 张
+                    ✓ {patternLibrarySelectedFiles.length} 张
                   </span>
                 )}
               </Space>
@@ -1076,6 +1203,12 @@ export default function InputsPanel() {
       <PatternLibraryPickerModal
         open={patternLibraryPickerOpen}
         onCancel={() => setPatternLibraryPickerOpen(false)}
+        multiFolder={designMode === "MULTI_TOPIC"}
+        onConfirmMulti={(selections) => {
+          setPatternLibrarySelections(selections);
+          setPatternLibraryPickerOpen(false);
+        }}
+        initialSelections={patternLibrarySelections}
         onConfirm={(folder, files) => {
           setPatternLibraryPath(folder);
           setPatternLibrarySelectedFiles(files);

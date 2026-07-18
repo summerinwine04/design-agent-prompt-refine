@@ -134,6 +134,10 @@ class NodeContext:
     use_style_cache: bool = True
     style_cache: Any = None
 
+    # --- v7 多主题 × 图库：跨文件夹参考图集 [{direction, topic_id, files: [abs paths]}] ---
+    # （v6 的 input_source / pattern_library_folder / core_ref_image_paths 在上方已定义）
+    reference_set: list = field(default_factory=list)
+
     def try_cache_lookup(self, name: str, prompt_node_id: str | None = None) -> dict | None:
         """
         按 name 查 replay_cache。命中条件：
@@ -685,6 +689,10 @@ def _enrich_assigned_topic(ctx: NodeContext, assigned: dict) -> dict:
                 if subtopics_list:
                     break
     full_desc = next((s for s in subtopics_list if s.get("编号") == tid), {})
+    if not full_desc and assigned.get("主题元信息"):
+        # v7 图库输入源：趋势 JSON 为空反查不到——2.4p 输出的主题元信息
+        # （含「图案视觉描述」「english_pattern_essence」）就是完整描述，直接用它。
+        full_desc = assigned["主题元信息"]
     return {
         **assigned,
         "完整主题描述": full_desc,
@@ -1674,6 +1682,148 @@ async def node_2_5_all_looks(
             "各role_A档已用": {r: a.a_tier_used for r, a in accumulated_by_role.items()},
         })
     return look_outputs, accumulated_by_role
+
+
+# =========================================================================== #
+# v7：2.4p 图库方向映射（多主题 × 图库输入源，替代 2.4 主题选择）
+#
+# 方向由用户在图库亲手选定（每个来源文件夹 = 一个方向），本节点只做：
+#   ① 逐方向看图输出「图案视觉描述」（下游 2.5 不看图，这段文字是视觉信息唯一载体）
+#   ② 色号 → 方向映射   ③ 整波策略
+# 输出 schema 与 2.4 完全同构，下游零改动。
+# =========================================================================== #
+
+async def node_2_4p_direction_mapping(
+    ctx: NodeContext,
+    style_analysis: dict,
+    color_results: list[dict],
+    gender_plan: dict,
+    parent_id: str | None = None,
+) -> dict:
+    cached = ctx.try_cache_lookup("图库方向映射", prompt_node_id="2.4p")
+    if cached is not None:
+        with ctx.writer.node(
+            "2_4p", "图库方向映射 ⚡缓存",
+            node_type="llm",
+            parent_id=parent_id,
+            prompt_version=ctx.bundle.version_label("2.4p"),
+        ) as node:
+            node.set_input({"_cache_hit": True})
+            node.set_output(cached)
+        return cached
+
+    if not ctx.reference_set:
+        raise ValueError("2.4p 要求 reference_set 非空（backend 应已装配）")
+
+    system, user_tpl = ctx.bundle.load("2.4p")
+
+    # 附图（按方向分组顺序）+ 清单说明 + 方向清单
+    image_paths: list = []
+    img_lines: list[str] = []
+    directions_manifest: list[dict] = []
+    idx = 1
+    for grp in ctx.reference_set:
+        directions_manifest.append({
+            "子主题编号": grp["topic_id"],
+            "子主题名称": grp["direction"],
+            "参考图数": len(grp["files"]),
+        })
+        img_lines.append(f"◆ 方向「{grp['direction']}」（编号 {grp['topic_id']}）：")
+        for p in grp["files"]:
+            image_paths.append(Path(p))
+            img_lines.append(f"  - Image {idx}：{Path(p).name}")
+            idx += 1
+
+    style_data = style_analysis.get("款式分析", {})
+    user_prompt = render_user_prompt(user_tpl, {
+        "参考图清单说明": "\n".join(img_lines),
+        "方向清单JSON": json.dumps(directions_manifest, ensure_ascii=False, indent=2),
+        "款式分析JSON": json.dumps(style_data, ensure_ascii=False, indent=2),
+        "性别比例要求": ctx.gender_ratio,
+        "性别分配JSON": json.dumps(gender_plan.get("分配结果", []), ensure_ascii=False, indent=2),
+        "色号识别汇总JSON": json.dumps(color_results, ensure_ascii=False, indent=2),
+    })
+    unresolved = list_unresolved_placeholders(user_prompt)
+    if unresolved:
+        raise ValueError(f"2.4p prompt 渲染后仍含未解析占位符：{unresolved}")
+
+    with ctx.writer.node(
+        "2_4p", "图库方向映射",
+        node_type="llm",
+        parent_id=parent_id,
+        prompt_version=ctx.bundle.version_label("2.4p"),
+    ) as node:
+        node.set_input({
+            "方向数": len(directions_manifest),
+            "参考图数": len(image_paths),
+            "色号数": len(color_results),
+            "user_prompt_chars": len(user_prompt),
+            "user_prompt": user_prompt,
+        })
+        result = ctx.llm.call_with_images(
+            system_prompt=system,
+            user_prompt=user_prompt,
+            image_paths=image_paths,
+            output_marker_regex=r"##\s*STEP\s*2\.4[pP]\s*OUTPUT",
+            model=ctx.model,
+            max_tokens=ctx.max_tokens,
+            stream_callback=node.emit_streaming,
+            dry_run=ctx.dry_run,
+            image_max_side=1536,   # 参考图看构图/线条/色相家族，1536 档足够
+        )
+        node.set_tokens(input=result.tokens_in, output=result.tokens_out)
+
+        if ctx.dry_run:
+            codes = [c.get("色号代码", "") for c in color_results]
+            n_dir = max(1, len(directions_manifest))
+            output = {
+                "_dry_run": True,
+                "整波主题策略": "dry-run 模拟（图库方向映射）",
+                "选用主题列表": [
+                    {**d, "档位推荐": "B", "性别气质": "中性", "整波定位": "主推",
+                     "入选理由": "dry-run", "图案视觉描述": "dry-run",
+                     "english_pattern_essence": "dry-run"}
+                    for d in directions_manifest
+                ],
+                "色号到主题映射": [
+                    {"色号代码": c, "营销色名": "",
+                     "选用主题编号": directions_manifest[i % n_dir]["子主题编号"],
+                     "选用主题名称": directions_manifest[i % n_dir]["子主题名称"],
+                     "分配理由": "dry-run"}
+                    for i, c in enumerate(codes)
+                ],
+            }
+        else:
+            if result.parsed_json is None:
+                raise RuntimeError("2.4p 模型输出无法解析为 JSON")
+            output = result.parsed_json
+            # 硬校验 ①：方向列表原样进原样出（编号集合一致）
+            want_ids = {d["子主题编号"] for d in directions_manifest}
+            got = output.get("选用主题列表") or []
+            got_ids = {t.get("子主题编号") for t in got}
+            if got_ids != want_ids:
+                raise RuntimeError(
+                    f"2.4p 违反硬约束：方向集合被改动（期望 {want_ids}，实得 {got_ids}）"
+                )
+            # 名称强制回填为文件夹名（不信 LLM 抄写）
+            name_by_id = {d["子主题编号"]: d["子主题名称"] for d in directions_manifest}
+            for t in got:
+                t["子主题名称"] = name_by_id.get(t.get("子主题编号"), t.get("子主题名称"))
+            # 硬校验 ②：全部色号映射且编号合法
+            mappings = output.get("色号到主题映射") or []
+            if len(mappings) != len(color_results):
+                raise RuntimeError(
+                    f"2.4p 色号映射数 = {len(mappings)}（必须 = 色号总数 {len(color_results)}）"
+                )
+            for m in mappings:
+                if m.get("选用主题编号") not in want_ids:
+                    raise RuntimeError(
+                        f"2.4p 映射的方向编号 '{m.get('选用主题编号')}' 不在给定集合内"
+                    )
+                m["选用主题名称"] = name_by_id.get(m.get("选用主题编号"), m.get("选用主题名称"))
+
+        node.set_output(output)
+    return output
 
 
 def flatten_look_outputs(look_outputs: list[dict]) -> list[dict]:

@@ -89,6 +89,14 @@ class Fixture(BaseModel):
     input_source: str = "trend_report"                     # trend_report | pattern_library
     pattern_library_path: Optional[str] = None             # 相对 PATTERN_LIBRARY_ROOT 的文件夹名
     pattern_library_selected_files: Optional[list[str]] = None  # 用户预筛 1-3 张
+    # v7 多主题 × 图库：跨文件夹分组选择
+    pattern_library_selections: Optional[list["PatternLibrarySelection"]] = None
+
+
+class PatternLibrarySelection(BaseModel):
+    """v7 多主题 × 图库：一个方向（来源文件夹）内的选图。"""
+    folder: str                # 图库根目录下的文件夹名（= 方向名 = 主题名）
+    files: list[str]           # 该文件夹内选中的文件名列表（数量不设限）
 
 
 class FixtureCreateRequest(BaseModel):
@@ -110,6 +118,8 @@ class FixtureCreateRequest(BaseModel):
     input_source: str = "trend_report"
     pattern_library_path: Optional[str] = None
     pattern_library_selected_files: Optional[list[str]] = None
+    # v7
+    pattern_library_selections: Optional[list[PatternLibrarySelection]] = None
 
 
 # ============================================================================
@@ -131,6 +141,8 @@ class RunCreateRequest(BaseModel):
     input_source: str = "trend_report"
     pattern_library_path: Optional[str] = None
     pattern_library_selected_files: Optional[list[str]] = None
+    # v7 多主题 × 图库：跨文件夹分组选择
+    pattern_library_selections: Optional[list[PatternLibrarySelection]] = None
 
     prompt_bundle: PromptBundleSpec = PromptBundleSpec()
     model: str = "gpt-5.5"
@@ -263,6 +275,8 @@ class Look(BaseModel):
     shooting_slot_kind: Optional[str] = None  # "upload" | "template" | None
     shooting_slot_url: Optional[str] = None
     shooting_slot_meta: Optional[dict] = None
+    # 波段上新管理：至多属一个波段；None = 未分波段池
+    wave_id: Optional[str] = None
     created_at: str
     updated_at: str
 
@@ -310,4 +324,67 @@ class ImageCategoryBulkRequest(BaseModel):
 
 class LooksExportRequest(BaseModel):
     """POST /looks/export-to-desktop：批量把选中的 look 图片导出到用户桌面。"""
+    look_ids: list[str]
+
+
+# ============================================================================
+# 选款中心（已确认上架的 SKU 仓库）
+# ============================================================================
+
+class SelectionStyle(BaseModel):
+    id: str
+    image_id: str                         # generated: task:plan；uploaded: upload:{uuid}
+    source_kind: str = "generated"        # generated | uploaded
+    category: Optional[str] = None        # top | bottom
+    style_no: Optional[str] = None
+    color_code: Optional[str] = None
+    color_name: Optional[str] = None
+    note: Optional[str] = None
+    origin: str = "手动选款"               # 手动选款 | 存量迁移 | 成套联动 | 上传
+    upload_url: Optional[str] = None      # uploaded 时的静态 URL
+    created_at: str
+
+
+class SelectionAddItem(BaseModel):
+    image_id: str
+    category: Optional[str] = None        # top | bottom（Gallery 侧已有归类可带上）
+    style_no: Optional[str] = None
+    color_code: Optional[str] = None
+    color_name: Optional[str] = None
+
+
+class SelectionAddRequest(BaseModel):
+    items: list[SelectionAddItem]
+
+
+# ============================================================================
+# 波段上新管理（Wave）
+# ============================================================================
+
+class Wave(BaseModel):
+    id: str
+    name: str
+    planned_launch_date: Optional[str] = None   # YYYY-MM-DD
+    status: str = "规划中"                       # 规划中 | 已上架（手动）
+    created_at: str
+    updated_at: str
+    # 派生统计（查询时算）
+    look_count: int = 0
+    style_count: int = 0                        # 波段内款色图去重数
+
+
+class WaveCreateRequest(BaseModel):
+    name: str
+    planned_launch_date: Optional[str] = None
+    look_ids: list[str] = Field(default_factory=list)   # 创建时可顺带初始归组
+
+
+class WaveUpdateRequest(BaseModel):
+    """PATCH：None 表示不动；planned_launch_date 传 "" 表示清除日期。"""
+    name: Optional[str] = None
+    planned_launch_date: Optional[str] = None
+    status: Optional[str] = None
+
+
+class WaveAssignRequest(BaseModel):
     look_ids: list[str]

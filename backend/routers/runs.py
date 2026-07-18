@@ -121,15 +121,23 @@ async def create_run(req: RunCreateRequest):
     from orchestrator.orchestrator import Step2Config, Step2Fixture, Step2Run
     from orchestrator.prompts import PromptBundle
 
-    # v6 图库输入源支持：无 trend_json_path 时兜底空 JSON
+    # v6/v7 图库输入源支持：无 trend_json_path 时兜底空 JSON
     input_source = fixture.get("input_source") or "trend_report"
     pattern_library_folder = fixture.get("pattern_library_path") or ""
     pattern_library_selected_files = fixture.get("pattern_library_selected_files") or []
+    # v7 多主题：跨文件夹分组选择 [{folder, files:[...]}, ...]
+    pattern_library_selections = fixture.get("pattern_library_selections") or []
+
+    design_mode = fixture.get("design_mode") or "MULTI_TOPIC"
 
     if input_source == "pattern_library":
-        # 图库输入源：SKIP 2.4s，trend_json 用 {} 兜底，trend_name 用文件夹名
+        # 图库输入源：trend_json 用 {} 兜底；trend_name：
+        #   收敛模式 = 文件夹名（v6 行为）；多主题 = 常量（历史避重按 (trend, style) 配对）
         trend_json = {}
-        trend_name = pattern_library_folder or "pattern_library"
+        if design_mode == "MULTI_TOPIC":
+            trend_name = "印花图案库"
+        else:
+            trend_name = pattern_library_folder or "pattern_library"
     else:
         # 趋势报告输入源：正常读取
         if not fixture.get("trend_json_path"):
@@ -137,29 +145,46 @@ async def create_run(req: RunCreateRequest):
         trend_json = json.loads(Path(fixture["trend_json_path"]).read_text(encoding="utf-8"))
         trend_name = Path(fixture["trend_json_path"]).stem
 
-    design_mode = fixture.get("design_mode") or "MULTI_TOPIC"
-
-    # v6 前置校验：图库输入 + MULTI_TOPIC = 非法组合（前端已经限制，backend 兜底防御）
-    if input_source == "pattern_library" and design_mode == "MULTI_TOPIC":
-        raise HTTPException(
-            400,
-            "图库输入源必须搭配 SINGLE_TOPIC_STRONG 或 COLLECTION_2SKU（Mode A 只能吃趋势报告）",
-        )
-
-    # v6 组装核心参考图绝对路径列表（供 orchestrator 传给 LLM 视觉输入）
+    # 组装图库参考图（v6 收敛：单文件夹 core_ref；v7 多主题：跨文件夹 reference_set）
     core_ref_image_paths: list[str] = []
+    reference_set: list[dict] = []
     if input_source == "pattern_library":
         from backend.routers.pattern_library import get_pattern_library_root
         pl_root = get_pattern_library_root()
-        for fn in pattern_library_selected_files:
-            p = pl_root / pattern_library_folder / fn
-            if not p.is_file():
-                raise HTTPException(400, f"图库文件不存在：{p}")
-            core_ref_image_paths.append(str(p.resolve()))
-        if not core_ref_image_paths:
-            raise HTTPException(400, "图库输入源要求至少 1 张核心参考图")
-        if len(core_ref_image_paths) > 3:
-            raise HTTPException(400, "核心参考图最多 3 张（Phase 1 硬上限）")
+
+        if design_mode == "MULTI_TOPIC":
+            # v7：每个来源文件夹 = 一个方向（主题），数量不设限（已拍板）
+            if not pattern_library_selections:
+                raise HTTPException(400, "多主题 × 图库输入要求 pattern_library_selections（按文件夹分组的选图）非空")
+            import hashlib as _hashlib
+            for sel in pattern_library_selections:
+                folder = (sel.get("folder") or "").strip()
+                files = sel.get("files") or []
+                if not folder or not files:
+                    continue
+                abs_files = []
+                for fn in files:
+                    p = pl_root / folder / fn
+                    if not p.is_file():
+                        raise HTTPException(400, f"图库文件不存在：{p}")
+                    abs_files.append(str(p.resolve()))
+                topic_id = "PL-" + _hashlib.md5(folder.encode("utf-8")).hexdigest()[:4].upper()
+                reference_set.append({
+                    "direction": folder,
+                    "topic_id": topic_id,
+                    "files": abs_files,
+                })
+            if not reference_set:
+                raise HTTPException(400, "图库输入源要求至少选 1 个方向且每方向至少 1 张图")
+        else:
+            # v6 收敛：单文件夹；张数上限已解除（原 3 张硬上限按拍板取消）
+            for fn in pattern_library_selected_files:
+                p = pl_root / pattern_library_folder / fn
+                if not p.is_file():
+                    raise HTTPException(400, f"图库文件不存在：{p}")
+                core_ref_image_paths.append(str(p.resolve()))
+            if not core_ref_image_paths:
+                raise HTTPException(400, "图库输入源要求至少 1 张核心参考图")
 
     if design_mode in ("SINGLE_TOPIC_STRONG", "COLLECTION_2SKU"):
         # v5 CONVERGE：装配 styles + looks（Mode B 自动包装；Mode C 用户预选）
@@ -221,10 +246,11 @@ async def create_run(req: RunCreateRequest):
         a_tier_quota=req.a_tier_quota,
         dry_run=req.dry_run,
         reuse_style_analysis=req.reuse_style_analysis,
-        # v6 图库输入源透传到 orchestrator
+        # v6/v7 图库输入源透传到 orchestrator
         input_source=input_source,
         pattern_library_folder=pattern_library_folder,
         core_ref_image_paths=core_ref_image_paths,
+        reference_set=reference_set,
     )
 
     # 历史避重：查同款+同趋势最近 5 轮 succeeded 的 final JSON，抽出选过的主题 + 同色号的方案摘要
@@ -1360,6 +1386,16 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
                         else None
                     )
                 ),
+                # v7 跨文件夹分组选择
+                "pattern_library_selections": (
+                    [s.model_dump() for s in req.pattern_library_selections]
+                    if req.pattern_library_selections
+                    else (
+                        json.loads(row["pattern_library_selections"])
+                        if "pattern_library_selections" in keys and row["pattern_library_selections"]
+                        else None
+                    )
+                ),
             }
         finally:
             conn.close()
@@ -1367,10 +1403,14 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
     input_source = req.input_source or "trend_report"
     # 图库输入源：trend_json_path 可缺；否则必填 3 字段
     if input_source == "pattern_library":
-        if not (req.pattern_library_path and req.pattern_library_selected_files):
+        # v7 多主题走 selections（跨文件夹分组）；v6 收敛走 path+selected_files（单文件夹）
+        has_v6 = bool(req.pattern_library_path and req.pattern_library_selected_files)
+        has_v7 = bool(req.pattern_library_selections)
+        if not (has_v6 or has_v7):
             raise HTTPException(
                 400,
-                "图库输入源要求 pattern_library_path + pattern_library_selected_files 都非空",
+                "图库输入源要求 pattern_library_selections（多主题）或 "
+                "pattern_library_path + pattern_library_selected_files（收敛模式）",
             )
         if not (req.ref_image_path and req.color_folder):
             raise HTTPException(
@@ -1396,6 +1436,10 @@ def _resolve_fixture(req: RunCreateRequest) -> dict:
         "input_source": input_source,
         "pattern_library_path": req.pattern_library_path,
         "pattern_library_selected_files": req.pattern_library_selected_files,
+        "pattern_library_selections": (
+            [s.model_dump() for s in req.pattern_library_selections]
+            if req.pattern_library_selections else None
+        ),
     }
 
 

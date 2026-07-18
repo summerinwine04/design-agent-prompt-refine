@@ -142,6 +142,11 @@ async def list_all_images(limit: int = 200):
                 "image_prompt_used": res.get("image_prompt_used"),
                 "方案说明": plan.get("方案说明"),
                 "适配度": plan.get("适配度"),
+                # 选款中心「设计灵感」弹窗用
+                "图案内容": plan.get("图案内容"),
+                "配色策略": plan.get("配色策略"),
+                "锚点列表": plan.get("锚点列表"),
+                "性别定向": plan.get("_性别定向") or plan.get("性别定向"),
                 # v5 CONVERGE：Collection View 按 look_id / role 聚合
                 "role": plan.get("role"),
                 "look_id": plan.get("look_id"),
@@ -854,6 +859,19 @@ def _auto_sync_collection_looks(task_id: str) -> int:
         bottom_img = next((img_by_plan[p] for p in roles.get("bottom") or [] if p in img_by_plan), None)
         if not top_img or not bottom_img:
             continue    # 有一侧还没生成成功——等另一侧任务完成时再同步
+        # 成套联动自动入仓：用户在设计前已手工配过 look，视为已确认选款；
+        # 否则「look 成员必须在仓」的硬约束会卡死自动同步。幂等（已在仓跳过）。
+        from backend.db import insert_selected_style as _ins_sel
+        import uuid as _uuid
+        for _img, _cat in ((top_img, "top"), (bottom_img, "bottom")):
+            _ins_sel(
+                id=f"sel-{int(_time.time())}-{_uuid.uuid4().hex[:6]}",
+                image_id=_img,
+                source_kind="generated",
+                category=_cat,
+                style_no=task_row.get("style_no"),
+                origin="成套联动",
+            )
         insert_look(
             id=f"look-{int(_time.time() * 1000)}-{secrets.token_hex(3)}",
             name=f"{ml.get('name') or lid}·{topic_name}".rstrip("·"),

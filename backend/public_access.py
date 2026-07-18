@@ -32,6 +32,8 @@ _GUEST_GET_PREFIXES = (
     "/api/v1/image-categories",   # 上下装归类
     "/api/v1/templates",          # 视觉模板库
     "/api/v1/billing",            # 账单（只读天然）
+    "/api/v1/waves",              # 波段上新管理（访客只读：写操作不进白名单）
+    "/api/v1/selection",          # 选款中心（访客只读：选款/上传/移除仅管理员）
 )
 
 # 访客可写（POST/PATCH/DELETE）的 API 前缀 —— Fitting Room 的组套/编辑操作

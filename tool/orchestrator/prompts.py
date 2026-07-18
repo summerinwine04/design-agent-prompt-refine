@@ -94,6 +94,7 @@ DEFAULT_PROMPT_FILES = {
     "2.4s": "04s_single_topic_selection.md",   # v5：单主题选择（收敛模式，选且仅选 1 个）
     "2.4.5": "045_pattern_blueprint.md",       # v5：母图案 Blueprint 设计
     "2.5L": "05L_look_variant_design.md",      # v5：按 look 联合变体设计
+    "2.4p": "04p_direction_mapping.md",        # v7：图库方向映射（多主题 × 图库输入，替代 2.4）
 }
 
 

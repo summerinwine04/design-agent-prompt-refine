@@ -37,6 +37,8 @@ NODE_FILES = {
     "2.4s": "04s_single_topic_selection.md",
     "2.4.5": "045_pattern_blueprint.md",
     "2.5L": "05L_look_variant_design.md",
+    # v7 图库方向映射（多主题 × 图库输入）
+    "2.4p": "04p_direction_mapping.md",
 }
 
 

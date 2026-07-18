@@ -1,10 +1,11 @@
-import { Card, Tag, Space, Spin, Empty, Button, Image, Modal, Select, Input, message, Switch } from "antd";
+import { Card, Tag, Space, Spin, Empty, Button, Image, Modal, Pagination, Select, Input, message, Switch } from "antd";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  listAllImages, listImageCategories, bulkUpsertImageCategories, createLooksBulk,
+  listAllImages, listImageCategories, bulkUpsertImageCategories,
+  addSelection, listSelectionImageIds,
 } from "../api/client";
 
 // 款号中文名启发式：服/衣/衫→上装，裤/裙→下装，其他默认上装
@@ -15,29 +16,8 @@ function guessCategory(styleNo: string | undefined): "top" | "bottom" {
   return "top";
 }
 
-// 参考原型的组套算法：按点选顺序 → 上装+下装自动配对
-// 同侧重复时前一个变"单款 look"（对应侧留空，用户回 Fitting Room 补文本）
-type ComposedLook = { top?: string; bottom?: string };
-function composeLooks(
-  orderedIds: string[],
-  catMap: Map<string, "top" | "bottom">,
-  getCategoryDefault: (id: string) => "top" | "bottom",
-): ComposedLook[] {
-  const looks: ComposedLook[] = [];
-  let cur: ComposedLook | null = null;
-  for (const id of orderedIds) {
-    const cat = catMap.get(id) || getCategoryDefault(id);
-    if (!cur) {
-      cur = {};
-      looks.push(cur);
-    } else if (cur[cat] !== undefined) {
-      cur = {};
-      looks.push(cur);
-    }
-    cur[cat] = id;
-  }
-  return looks;
-}
+// 注：组套已搬到选款中心（漏斗：生图候选 → 选款入仓 → 选款中心组套 → Fitting Room）。
+// Gallery 的多选 + 上/下装归类现在服务于「批量选款入仓」。
 
 /**
  * 跨任务全局图片墙（Gallery）
@@ -56,7 +36,6 @@ export default function TasksGalleryPage() {
   // 全屏放大预览的 URL —— 用 antd Image 的浮层，跟 modalItem 完全解耦
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   // 组套模式
@@ -71,7 +50,7 @@ export default function TasksGalleryPage() {
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["all-images"],
-    queryFn: () => listAllImages(200),
+    queryFn: () => listAllImages(1000),
     refetchInterval: composeMode ? false : 5000,     // 组套时暂停刷新，防止 grid 抖动
   });
 
@@ -121,36 +100,42 @@ export default function TasksGalleryPage() {
     });
   };
 
-  const composed = useMemo(
-    () => composeLooks(selectedIds, categoryMap, (id) => {
-      // 默认分类：方案级 role（成套 run 精确）> 款号启发式（兜底）
-      const [tid, pid] = id.split(":");
-      const item = (data?.items || []).find((it: any) => it.task_id === tid && it.plan_id === pid);
-      if (item?.role === "top" || item?.role === "bottom") return item.role;
-      return guessCategory(item?.style_no);
-    }),
-    [selectedIds, categoryMap, data],
-  );
+  // 已入仓的 image_id 集合（角标 + 防重复入仓提示）
+  const { data: stockIds } = useQuery({
+    queryKey: ["selection-image-ids"],
+    queryFn: () => listSelectionImageIds(),
+  });
+  const inStock = useMemo(() => new Set(stockIds || []), [stockIds]);
 
-  const syncMut = useMutation({
+  // 批量选款入仓
+  const addSelMut = useMutation({
     mutationFn: () => {
-      const payload = composed.map((lk) => ({
-        top_kind: lk.top ? "image" as const : null,
-        top_image_id: lk.top || null,
-        bottom_kind: lk.bottom ? "image" as const : null,
-        bottom_image_id: lk.bottom || null,
-      }));
-      return createLooksBulk(payload);
+      const itemsById = new Map(
+        (data?.items || []).map((it: any) => [`${it.task_id}:${it.plan_id}`, it]),
+      );
+      return addSelection(
+        selectedIds.map((id) => {
+          const it: any = itemsById.get(id) || {};
+          return {
+            image_id: id,
+            category: categoryMap.get(id)
+              || (it.role === "top" || it.role === "bottom" ? it.role : guessCategory(it.style_no)),
+            style_no: it.style_no || null,
+            color_code: it.color_code || null,
+            color_name: it.color_name || null,
+          };
+        }),
+      );
     },
-    onSuccess: (result) => {
-      message.success(`已同步 ${result.length} 套到 Fitting Room`);
+    onSuccess: (r: any) => {
+      message.success(
+        `已入仓 ${r.added} 款` + (r.skipped ? `（${r.skipped} 款已在仓，跳过）` : ""),
+      );
       setSelectedIds([]);
-      setComposeMode(false);
-      searchParams.delete("compose");
-      setSearchParams(searchParams, { replace: true });
-      navigate("/fitting-room");
+      queryClient.invalidateQueries({ queryKey: ["selection"] });
+      queryClient.invalidateQueries({ queryKey: ["selection-image-ids"] });
     },
-    onError: (e: any) => message.error("同步失败：" + (e?.message || String(e))),
+    onError: (e: any) => message.error("入仓失败：" + (e?.response?.data?.detail || e?.message)),
   });
 
   const items: any[] = data?.items || [];
@@ -182,6 +167,15 @@ export default function TasksGalleryPage() {
     });
   }, [items, filterStyle, filterTrend, search]);
 
+  // 翻页：40 张/页，筛选变化回第 1 页
+  const PAGE_SIZE = 40;
+  const [page, setPage] = useState(1);
+  useEffect(() => { setPage(1); }, [filterStyle, filterTrend, search]);
+  const paged = useMemo(
+    () => filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+    [filtered, page],
+  );
+
   if (isLoading) return <Spin tip="加载所有生成图..." style={{ margin: 48 }} />;
   if (error) return <Empty description="加载失败" style={{ marginTop: 80 }} />;
 
@@ -196,7 +190,7 @@ export default function TasksGalleryPage() {
         </Space>
         <Space>
           <span style={{ fontSize: 12, color: composeMode ? "#1677ff" : "#999", fontWeight: composeMode ? 600 : 400 }}>
-            组套模式
+            🛒 选款模式
           </span>
           <Switch
             checked={composeMode}
@@ -208,9 +202,9 @@ export default function TasksGalleryPage() {
               setSearchParams(next, { replace: true });
             }}
           />
+          <Link to="/selection"><Button>🛒 选款中心</Button></Link>
           <Link to="/fitting-room"><Button>👗 Fitting Room</Button></Link>
           <Link to="/tasks"><Button>← 任务列表</Button></Link>
-          <Link to="/"><Button>工作台</Button></Link>
         </Space>
       </Space>
 
@@ -262,7 +256,7 @@ export default function TasksGalleryPage() {
             gap: 4,
           }}
         >
-          {filtered.map((it) => {
+          {paged.map((it) => {
             const imageId = `${it.task_id}:${it.plan_id}`;
             const selIdx = selectedIds.indexOf(imageId);
             const cat = getCategoryForImage(it);
@@ -273,6 +267,7 @@ export default function TasksGalleryPage() {
                 composeMode={composeMode}
                 selectionIndex={selIdx}
                 category={cat}
+                inStock={inStock.has(imageId)}
                 onToggleCategory={() => toggleCategory(imageId, cat)}
                 onClick={() => {
                   if (composeMode) toggleSelection(imageId);
@@ -282,6 +277,20 @@ export default function TasksGalleryPage() {
               />
             );
           })}
+        </div>
+      )}
+
+      {/* 底部翻页器 */}
+      {filtered.length > PAGE_SIZE && (
+        <div style={{ display: "flex", justifyContent: "center", marginTop: 20 }}>
+          <Pagination
+            current={page}
+            pageSize={PAGE_SIZE}
+            total={filtered.length}
+            showSizeChanger={false}
+            showTotal={(t) => `共 ${t} 张`}
+            onChange={(p) => { setPage(p); window.scrollTo({ top: 0 }); }}
+          />
         </div>
       )}
 
@@ -309,7 +318,7 @@ export default function TasksGalleryPage() {
         />
       )}
 
-      {/* 组套模式：底部悬浮状态栏 */}
+      {/* 选款模式：底部悬浮状态栏 */}
       {composeMode && (
         <div
           style={{
@@ -327,17 +336,8 @@ export default function TasksGalleryPage() {
             <span style={{ fontSize: 14 }}>
               已选 <strong style={{ color: "#1677ff" }}>{selectedIds.length}</strong> 张
             </span>
-            <span style={{ fontSize: 13, color: "#666" }}>
-              自动组套 <strong style={{ color: "#1677ff" }}>{composed.length}</strong> 套
-              {(() => {
-                const missing = composed.filter((lk) => !lk.top || !lk.bottom).length;
-                return missing > 0 ? (
-                  <span style={{ color: "#faad14", marginLeft: 6 }}>· 缺侧 {missing} 套</span>
-                ) : null;
-              })()}
-            </span>
             <span style={{ fontSize: 11, color: "#999" }}>
-              (按点击顺序 上装+下装 自动配对，同侧连点前一个成"单款 look" 到看板上补文本)
+              (点图多选，卡片右上角可切换 上装/下装 归类；入仓后去选款中心组套)
             </span>
           </Space>
           <Space>
@@ -349,11 +349,11 @@ export default function TasksGalleryPage() {
             </Button>
             <Button
               type="primary"
-              onClick={() => syncMut.mutate()}
-              disabled={composed.length === 0}
-              loading={syncMut.isPending}
+              onClick={() => addSelMut.mutate()}
+              disabled={selectedIds.length === 0}
+              loading={addSelMut.isPending}
             >
-              同步到 Fitting Room ({composed.length}) →
+              🛒 加入选款中心 ({selectedIds.length})
             </Button>
           </Space>
         </div>
@@ -365,6 +365,7 @@ export default function TasksGalleryPage() {
 
 function TileImage({
   item, onClick, composeMode = false, selectionIndex = -1, category, onToggleCategory, onPreview,
+  inStock = false,
 }: {
   item: any;
   onClick: () => void;
@@ -373,6 +374,7 @@ function TileImage({
   category?: "top" | "bottom";
   onToggleCategory?: () => void;
   onPreview?: (url: string) => void;
+  inStock?: boolean;
 }) {
   const isSelected = selectionIndex >= 0;
   return (
@@ -401,7 +403,25 @@ function TileImage({
         (e.currentTarget as HTMLDivElement).style.zIndex = "";
       }}
     >
-      {/* 组套模式：右上角 上装/下装 标签（可点切换） */}
+      {/* 已入仓角标：右下角常显（选款状态一目了然） */}
+      {inStock && (
+        <div
+          style={{
+            position: "absolute",
+            bottom: 6, right: 6,
+            padding: "1px 7px",
+            fontSize: 10, fontWeight: 600,
+            borderRadius: 999,
+            background: "rgba(82,196,26,0.92)",
+            color: "#fff",
+            zIndex: 3,
+            pointerEvents: "none",
+          }}
+        >
+          🛒 已入仓
+        </div>
+      )}
+      {/* 选款模式：右上角 上装/下装 标签（可点切换） */}
       {composeMode && category && (
         <div
           onClick={(e) => { e.stopPropagation(); onToggleCategory?.(); }}

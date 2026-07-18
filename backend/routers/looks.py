@@ -87,6 +87,7 @@ def _row_to_look(row: dict) -> Look:
         shooting_slot_kind=row.get("shooting_slot_kind"),
         shooting_slot_url=row.get("shooting_slot_url"),
         shooting_slot_meta=meta,
+        wave_id=row.get("wave_id"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
@@ -131,9 +132,25 @@ async def get_look_endpoint(look_id: str):
 
 @router.post("", response_model=list[Look])
 async def create_looks_bulk(req: LookBulkCreateRequest):
-    """一次批量新建（Gallery 组套 → 同步到看板的入口）"""
+    """一次批量新建（选款中心组套 → 同步到看板的入口）。
+
+    硬约束：look 的成员图必须已在选款中心仓库（selected_styles）。
+    """
     if not req.looks:
         return []
+    from backend.db import selected_image_ids
+    in_stock = selected_image_ids()
+    missing = []
+    for item in req.looks:
+        for img_id, kind in ((item.top_image_id, item.top_kind), (item.bottom_image_id, item.bottom_kind)):
+            if kind == "image" and img_id and img_id not in in_stock:
+                missing.append(img_id)
+    if missing:
+        raise HTTPException(
+            400,
+            f"以下款图未入选款中心仓库，请先选款：{missing[:10]}"
+            + (f" 等 {len(missing)} 张" if len(missing) > 10 else ""),
+        )
     # 生成 id + 自动命名（基于现有 look 数量 + 起始序号）
     existing_count = len(db_list_looks(limit=10000))
     created_ids: list[str] = []
@@ -444,9 +461,10 @@ async def export_looks_to_desktop(req: LooksExportRequest):
                     existing_tags = []
             except Exception:
                 existing_tags = []
-            if "已导出" not in existing_tags:
-                existing_tags.append("已导出")
-                db_update_look(lid, tags=existing_tags)
+            # 导出标记带时间戳（前端显示「MM-DD HH:MM 导出」）；重复导出刷新时间
+            existing_tags = [t for t in existing_tags if not str(t).startswith("已导出")]
+            existing_tags.append(f"已导出:{datetime.now().strftime('%Y-%m-%d %H:%M')}")
+            db_update_look(lid, tags=existing_tags)
             exported.append({
                 "look_id": lid,
                 "look_name": look_name,

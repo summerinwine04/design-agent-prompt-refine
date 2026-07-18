@@ -46,8 +46,9 @@ async def create_fixture(req: FixtureCreateRequest):
             """INSERT INTO fixtures (id, name, trend_json_path, ref_image_path, color_folder,
                        selected_colors, gender_ratio, num_designs_k, description,
                        design_mode, styles, looks, color_strategy,
-                       input_source, pattern_library_path, pattern_library_selected_files)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       input_source, pattern_library_path, pattern_library_selected_files,
+                       pattern_library_selections)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 req.id, req.name, req.trend_json_path, req.ref_image_path,
                 req.color_folder,
@@ -61,6 +62,8 @@ async def create_fixture(req: FixtureCreateRequest):
                 req.pattern_library_path,
                 json.dumps(req.pattern_library_selected_files, ensure_ascii=False)
                     if req.pattern_library_selected_files else None,
+                json.dumps([s.model_dump() for s in req.pattern_library_selections], ensure_ascii=False)
+                    if req.pattern_library_selections else None,
             ),
         )
         conn.commit()
@@ -104,6 +107,11 @@ def _row(r) -> Fixture:
         pattern_library_selected_files=(
             json.loads(r["pattern_library_selected_files"])
             if "pattern_library_selected_files" in keys and r["pattern_library_selected_files"]
+            else None
+        ),
+        pattern_library_selections=(
+            json.loads(r["pattern_library_selections"])
+            if "pattern_library_selections" in keys and r["pattern_library_selections"]
             else None
         ),
     )

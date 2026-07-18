@@ -145,7 +145,6 @@ export default function TaskDetailPage() {
           <Link to="/tasks/gallery">
             <Button type="primary" ghost>🖼️ 查看全部生图</Button>
           </Link>
-          <Link to="/"><Button>工作台</Button></Link>
         </Space>
       </Space>
 

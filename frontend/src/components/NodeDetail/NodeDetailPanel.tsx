@@ -21,7 +21,7 @@ function extractBizNumber(nodeId: string): string {
 }
 
 // 有 prompt 的节点：v4 的 6 个 + v5 CONVERGE 图（强单主题/成套）的 3 个，都能编辑 prompt + fork
-const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"]);
+const PROMPT_NODES = new Set(["2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L", "2.4p"]);
 
 export default function NodeDetailPanel() {
   const { currentRunId, selectedNodeId } = useRunStore();

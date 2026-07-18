@@ -27,6 +27,7 @@ from .nodes import (
     node_2_3_gender_planning,
     node_2_4_5_blueprint,
     node_2_4_topic_selection,
+    node_2_4p_direction_mapping,
     node_2_4s_single_topic,
     node_2_5_all_colors,
     node_2_5_all_looks,
@@ -134,6 +135,8 @@ class Step2Config:
     input_source: str = "trend_report"                            # trend_report | pattern_library
     pattern_library_folder: str = ""                              # 图库文件夹相对名（充当"子主题名"）
     core_ref_image_paths: list = field(default_factory=list)      # 用户预筛的 1-3 张绝对路径
+    # v7 多主题 × 图库：跨文件夹参考图集 [{direction, topic_id, files: [abs paths]}]
+    reference_set: list = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -160,9 +163,9 @@ class Step2Run:
     # v4 节点级联失效图：用户改了某节点的 prompt 版本，本节点 + 所有依赖它输出的下游
     # 节点都强制 cache miss。注意 2.5 prompt 改了会让 2.8 失效（2.8 复用 2.5 system prompt）。
     _DOWNSTREAM = {
-        "2.1": {"2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"},
-        "2.2": {"2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"},
-        "2.3": {"2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"},
+        "2.1": {"2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L", "2.4p"},
+        "2.2": {"2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L", "2.4p"},
+        "2.3": {"2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L", "2.4p"},
         "2.4": {"2.4", "2.5", "2.8"},
         "2.5": {"2.5", "2.8"},
         "2.8": {"2.8"},
@@ -170,6 +173,8 @@ class Step2Run:
         "2.4s": {"2.4s", "2.4.5", "2.5L"},
         "2.4.5": {"2.4.5", "2.5L"},
         "2.5L": {"2.5L"},
+        # v7 图库方向映射（DIVERGE 图中替代 2.4 的位置）
+        "2.4p": {"2.4p", "2.5", "2.8"},
     }
 
     def __init__(
@@ -276,7 +281,7 @@ class Step2Run:
                 run_started = _json.loads(first_line)
                 src_bundle = run_started.get("prompt_bundle", {}) or {}
                 new_bundle = self.bundle.to_meta_dict()
-                for node_id in ("2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L"):
+                for node_id in ("2.1", "2.2", "2.3", "2.4", "2.5", "2.8", "2.4s", "2.4.5", "2.5L", "2.4p"):
                     # 老 run 的 bundle 里没有 v5 节点 key —— 双方都缺时视为一致，
                     # 避免 fork 老 Mode A run 时误报 v5 节点 force_miss（虽无实际影响）
                     if src_bundle.get(node_id) != new_bundle.get(node_id):
@@ -324,10 +329,16 @@ class Step2Run:
         # 2.3 性别比规划
         gender_plan = await node_2_3_gender_planning(ctx, color_results)
 
-        # 2.4 趋势主题选择（v4 新增节点）：选 2-3 个主题 + 每色号映射 1 个
-        topic_selection = await node_2_4_topic_selection(
-            ctx, style_analysis, color_results, gender_plan,
-        )
+        # 2.4 主题选择：趋势报告 → LLM 从报告选 2-3 主题（2.4）；
+        # v7 图库输入 → 方向由用户亲手选定，只做视觉描述 + 色号映射（2.4p）
+        if ctx.input_source == "pattern_library":
+            topic_selection = await node_2_4p_direction_mapping(
+                ctx, style_analysis, color_results, gender_plan,
+            )
+        else:
+            topic_selection = await node_2_4_topic_selection(
+                ctx, style_analysis, color_results, gender_plan,
+            )
 
         # 2.5 单色设计（串行，吃 2.4 分配的主题，不再吃完整趋势 JSON）
         color_outputs, accumulated = await node_2_5_all_colors(
@@ -433,6 +444,7 @@ class Step2Run:
             input_source=self.config.input_source,
             pattern_library_folder=self.config.pattern_library_folder,
             core_ref_image_paths=list(self.config.core_ref_image_paths),
+            reference_set=list(self.config.reference_set),
         )
 
     async def _run_converge(self) -> dict:

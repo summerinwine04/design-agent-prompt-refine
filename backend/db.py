@@ -164,6 +164,31 @@ CREATE TABLE IF NOT EXISTS image_categories (
     source       TEXT,                      -- "auto"（款号启发式）| "manual"
     updated_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 选款中心：已确认上架的 SKU 仓库（Fitting Room 组套只能取仓内的款）
+CREATE TABLE IF NOT EXISTS selected_styles (
+    id           TEXT PRIMARY KEY,      -- sel-{timestamp}-{hex6}
+    image_id     TEXT NOT NULL UNIQUE,  -- generated: {task_id}:{plan_id}；uploaded: upload:{uuid}
+    source_kind  TEXT NOT NULL DEFAULT 'generated',  -- generated | uploaded
+    category     TEXT,                  -- top | bottom（组套槽位归类）
+    style_no     TEXT,
+    color_code   TEXT,
+    color_name   TEXT,
+    note         TEXT,
+    origin       TEXT NOT NULL DEFAULT '手动选款',  -- 手动选款 | 存量迁移 | 成套联动 | 上传
+    upload_path  TEXT,                  -- uploaded：data/selection_uploads/ 下的文件名
+    created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 波段上新管理：波段（Wave）= 上新排期容器；look 至多属于一个波段
+CREATE TABLE IF NOT EXISTS waves (
+    id                   TEXT PRIMARY KEY,  -- wv-{timestamp}-{hex6}
+    name                 TEXT NOT NULL,     -- 波段名（自由文本，允许重名）
+    planned_launch_date  TEXT,              -- 预备上架时间（YYYY-MM-DD，可空）
+    status               TEXT NOT NULL DEFAULT '规划中',  -- 规划中 | 已上架（手动切换）
+    created_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 
@@ -187,6 +212,8 @@ def init_db() -> None:
             ("shooting_slot_kind", "TEXT"),
             ("shooting_slot_url",  "TEXT"),
             ("shooting_slot_meta", "TEXT"),
+            # 波段上新管理：look 至多属一个波段；NULL = 未分波段池
+            ("wave_id",            "TEXT"),
         ]:
             if col_name not in cols:
                 conn.execute(f"ALTER TABLE looks ADD COLUMN {col_name} {col_def}")
@@ -204,6 +231,7 @@ def init_db() -> None:
             ("input_source",                   "TEXT DEFAULT 'trend_report'"),  # trend_report | pattern_library
             ("pattern_library_path",           "TEXT"),   # 相对 PATTERN_LIBRARY_ROOT 的文件夹名
             ("pattern_library_selected_files", "TEXT"),   # JSON 数组：用户预筛的 1-3 张图文件名
+            ("pattern_library_selections",     "TEXT"),   # v7 JSON：[{folder, files:[...]}]（跨文件夹分组）
         ]:
             if col_name not in fcols:
                 conn.execute(f"ALTER TABLE fixtures ADD COLUMN {col_name} {col_def}")
@@ -215,6 +243,26 @@ def init_db() -> None:
             conn.execute("ALTER TABLE runs ADD COLUMN design_mode TEXT DEFAULT 'MULTI_TOPIC'")
         if "input_source" not in rcols:
             conn.execute("ALTER TABLE runs ADD COLUMN input_source TEXT DEFAULT 'trend_report'")
+
+        # 选款中心存量回填（幂等）：现有 look 引用的图自动视为已选中，
+        # 否则「Fitting Room 只能用仓内款」的硬约束会把历史数据全部卡死。
+        import time as _t
+        import uuid as _uuid
+        rows = conn.execute(
+            """SELECT top_kind, top_image_id, bottom_kind, bottom_image_id FROM looks"""
+        ).fetchall()
+        for r in rows:
+            for kind_col, img_col, cat in (
+                ("top_kind", "top_image_id", "top"),
+                ("bottom_kind", "bottom_image_id", "bottom"),
+            ):
+                if r[kind_col] == "image" and r[img_col]:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO selected_styles
+                           (id, image_id, source_kind, category, origin)
+                           VALUES (?, ?, 'generated', ?, '存量迁移')""",
+                        (f"sel-{int(_t.time())}-{_uuid.uuid4().hex[:6]}", r[img_col], cat),
+                    )
         conn.commit()
     finally:
         conn.close()
@@ -580,6 +628,270 @@ def delete_look(look_id: str) -> None:
     try:
         conn.execute("DELETE FROM looks WHERE id = ?", (look_id,))
         conn.commit()
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# 选款中心：selected_styles CRUD
+# ============================================================================
+
+def list_selected_styles() -> list[dict]:
+    """按入仓时间倒序。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM selected_styles ORDER BY created_at DESC, id DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+def get_selected_style(sel_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT * FROM selected_styles WHERE id = ?", (sel_id,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def get_selected_by_image_id(image_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        r = conn.execute(
+            "SELECT * FROM selected_styles WHERE image_id = ?", (image_id,)
+        ).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def selected_image_ids() -> set[str]:
+    """全部已入仓的 image_id（前端角标 / look 校验用）。"""
+    conn = get_conn()
+    try:
+        return {r["image_id"] for r in conn.execute("SELECT image_id FROM selected_styles")}
+    finally:
+        conn.close()
+
+
+def insert_selected_style(
+    *,
+    id: str,
+    image_id: str,
+    source_kind: str = "generated",
+    category: str | None = None,
+    style_no: str | None = None,
+    color_code: str | None = None,
+    color_name: str | None = None,
+    note: str | None = None,
+    origin: str = "手动选款",
+    upload_path: str | None = None,
+) -> bool:
+    """入仓。image_id 已存在则跳过（幂等），返回是否真的插入。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            """INSERT OR IGNORE INTO selected_styles
+               (id, image_id, source_kind, category, style_no, color_code, color_name,
+                note, origin, upload_path)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, image_id, source_kind, category, style_no, color_code, color_name,
+             note, origin, upload_path),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    finally:
+        conn.close()
+
+
+def delete_selected_style(sel_id: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM selected_styles WHERE id = ?", (sel_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def looks_referencing_image(image_id: str) -> list[dict]:
+    """引用了该图的 look（移除阻断用）。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            """SELECT id, name FROM looks
+               WHERE (top_kind = 'image' AND top_image_id = ?)
+                  OR (bottom_kind = 'image' AND bottom_image_id = ?)""",
+            (image_id, image_id),
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# 波段上新管理：waves CRUD（look 至多属一个波段；wave_id NULL = 未分波段池）
+# ============================================================================
+
+def list_waves() -> list[dict]:
+    """全部波段 + 派生统计。
+
+    - look_count：波段内 look 数
+    - style_count：波段内款式数 = 成员款色图（image_id）去重后计数
+      （同一张款色图在多个 look 里复用只计 1 款；上下装齐 = 2 个计数来源）
+    排序：预备上架时间升序，无日期垫底；同日期按创建时间。
+    """
+    conn = get_conn()
+    try:
+        waves = [dict(r) for r in conn.execute(
+            """SELECT * FROM waves
+               ORDER BY (planned_launch_date IS NULL) ASC,
+                        planned_launch_date ASC, created_at ASC"""
+        ).fetchall()]
+        rows = conn.execute(
+            """SELECT wave_id, top_kind, top_image_id, bottom_kind, bottom_image_id
+               FROM looks WHERE wave_id IS NOT NULL"""
+        ).fetchall()
+        look_counts: dict[str, int] = {}
+        style_sets: dict[str, set] = {}
+        for r in rows:
+            wid = r["wave_id"]
+            look_counts[wid] = look_counts.get(wid, 0) + 1
+            s = style_sets.setdefault(wid, set())
+            if r["top_kind"] == "image" and r["top_image_id"]:
+                s.add(r["top_image_id"])
+            if r["bottom_kind"] == "image" and r["bottom_image_id"]:
+                s.add(r["bottom_image_id"])
+        for w in waves:
+            w["look_count"] = look_counts.get(w["id"], 0)
+            w["style_count"] = len(style_sets.get(w["id"], set()))
+        return waves
+    finally:
+        conn.close()
+
+
+def get_wave(wave_id: str) -> dict | None:
+    conn = get_conn()
+    try:
+        r = conn.execute("SELECT * FROM waves WHERE id = ?", (wave_id,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
+def insert_wave(*, id: str, name: str, planned_launch_date: str | None = None) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            "INSERT INTO waves (id, name, planned_launch_date) VALUES (?, ?, ?)",
+            (id, name, planned_launch_date),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def update_wave(wave_id: str, **fields) -> None:
+    """name / planned_launch_date / status 部分更新。
+    planned_launch_date 传空字符串 "" 表示清除日期（置 NULL）。"""
+    allowed = {"name", "planned_launch_date", "status"}
+    updates: list[str] = []
+    values: list = []
+    for k, v in fields.items():
+        if k not in allowed or v is None:
+            continue
+        if k == "planned_launch_date" and v == "":
+            v = None
+        updates.append(f"{k} = ?")
+        values.append(v)
+    if not updates:
+        return
+    updates.append("updated_at = CURRENT_TIMESTAMP")
+    values.append(wave_id)
+    conn = get_conn()
+    try:
+        conn.execute(f"UPDATE waves SET {', '.join(updates)} WHERE id = ?", tuple(values))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_wave(wave_id: str) -> int:
+    """删除波段：成员 look 回未分波段池（wave_id 置 NULL），绝不删 look。
+    返回被释放的 look 数。"""
+    conn = get_conn()
+    try:
+        cur = conn.execute(
+            "UPDATE looks SET wave_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE wave_id = ?",
+            (wave_id,),
+        )
+        conn.execute("DELETE FROM waves WHERE id = ?", (wave_id,))
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def assign_looks_to_wave(wave_id: str, look_ids: list[str]) -> int:
+    """批量归组：look 已在其他波段则自动移过来（单归属模型）。
+    同时 bump 目标波段与被移出波段的 updated_at。"""
+    if not look_ids:
+        return 0
+    conn = get_conn()
+    try:
+        ph = ",".join("?" for _ in look_ids)
+        # 记录受影响的原波段（含目标自己，无害）
+        old_wave_ids = {
+            r["wave_id"]
+            for r in conn.execute(
+                f"SELECT DISTINCT wave_id FROM looks WHERE id IN ({ph}) AND wave_id IS NOT NULL",
+                tuple(look_ids),
+            ).fetchall()
+        }
+        cur = conn.execute(
+            f"UPDATE looks SET wave_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id IN ({ph})",
+            (wave_id, *look_ids),
+        )
+        touched = old_wave_ids | {wave_id}
+        ph2 = ",".join("?" for _ in touched)
+        conn.execute(
+            f"UPDATE waves SET updated_at = CURRENT_TIMESTAMP WHERE id IN ({ph2})",
+            tuple(touched),
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+def unassign_looks(look_ids: list[str]) -> int:
+    """批量移出波段，回未分波段池。bump 被移出波段的 updated_at。"""
+    if not look_ids:
+        return 0
+    conn = get_conn()
+    try:
+        ph = ",".join("?" for _ in look_ids)
+        old_wave_ids = {
+            r["wave_id"]
+            for r in conn.execute(
+                f"SELECT DISTINCT wave_id FROM looks WHERE id IN ({ph}) AND wave_id IS NOT NULL",
+                tuple(look_ids),
+            ).fetchall()
+        }
+        cur = conn.execute(
+            f"UPDATE looks SET wave_id = NULL, updated_at = CURRENT_TIMESTAMP WHERE id IN ({ph})",
+            tuple(look_ids),
+        )
+        if old_wave_ids:
+            ph2 = ",".join("?" for _ in old_wave_ids)
+            conn.execute(
+                f"UPDATE waves SET updated_at = CURRENT_TIMESTAMP WHERE id IN ({ph2})",
+                tuple(old_wave_ids),
+            )
+        conn.commit()
+        return cur.rowcount
     finally:
         conn.close()
 

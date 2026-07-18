@@ -15,7 +15,19 @@ const queryClient = new QueryClient({
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider
+      locale={zhCN}
+      theme={{
+        components: {
+          // 全平台 Segmented 选中态：蓝底白字（默认白底浮起与灰轨道对比不足，
+          // 用户会把深色未选中读成"按下=激活"，语义反转）
+          Segmented: {
+            itemSelectedBg: "#1677ff",
+            itemSelectedColor: "#ffffff",
+          },
+        },
+      }}
+    >
       <QueryClientProvider client={queryClient}>
         <BrowserRouter>
           <App />
