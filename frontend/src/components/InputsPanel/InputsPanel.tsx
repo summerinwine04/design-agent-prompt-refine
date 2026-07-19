@@ -6,6 +6,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { listTrends, listStyles, listFixtures, listRuns, getStyle, createFixture, uploadTrend, subscribeTrendImport } from "../../api/client";
 import { useRunStore } from "../../store/runStore";
 import PatternLibraryPickerModal, { PatternLibrarySelection } from "../PatternLibraryPickerModal/PatternLibraryPickerModal";
+import { StyleLibraryModal, StyleUploadModal } from "../StyleLibrary/StyleLibraryModals";
 
 
 const STATUS_COLOR: Record<string, string> = {
@@ -160,14 +161,49 @@ export default function InputsPanel() {
   });
 
   // 款号选项里同时藏 ref_image_path + color_folder，选中时一并填
+  // 缺款级双视角图（ref_image=None）的款不可选——step 2.1 没有输入图
   const styleOptions = useMemo(
     () => (styles?.styles ?? []).map((s: any) => ({
       value: s.style_no,
-      label: `${s.style_no}（${s.color_count} 色）`,
+      label: s.ref_image
+        ? `${s.style_no}（${s.color_count} 色）`
+        : `${s.style_no}（缺双视角图，不可选）`,
+      disabled: !s.ref_image,
       ref_image: s.ref_image,
       color_folder: s.color_folder,
     })),
     [styles],
+  );
+
+  // 款图库管理弹窗（PRD v1.3）：+新增 / 🗂 管理
+  const [styleUploadOpen, setStyleUploadOpen] = useState(false);
+  const [styleLibraryOpen, setStyleLibraryOpen] = useState(false);
+  const [styleAppendPreset, setStyleAppendPreset] = useState<string | undefined>();
+  // 记住从哪个款号选择器点开的「+新增」，入库成功后自动选中新款
+  const styleUploadTargetRef = useRef<"style_no" | "top_style_no" | "bottom_style_no">("style_no");
+
+  const openStyleUpload = (target: "style_no" | "top_style_no" | "bottom_style_no") => {
+    styleUploadTargetRef.current = target;
+    setStyleAppendPreset(undefined);
+    setStyleUploadOpen(true);
+  };
+
+  const styleFieldLabel = (
+    text: string, target: "style_no" | "top_style_no" | "bottom_style_no", withManage = false,
+  ) => (
+    <Space size={2}>
+      <span>{text}</span>
+      <Button size="small" type="link" style={{ padding: "0 4px" }} disabled={isRunning}
+        onClick={() => openStyleUpload(target)}>
+        +新增
+      </Button>
+      {withManage && (
+        <Button size="small" type="link" style={{ padding: "0 4px" }} disabled={isRunning}
+          onClick={() => setStyleLibraryOpen(true)}>
+          🗂 管理
+        </Button>
+      )}
+    </Space>
   );
 
   const trendOptions = useMemo(
@@ -747,10 +783,10 @@ export default function InputsPanel() {
           {designMode !== "COLLECTION_2SKU" ? (
             <>
               <Form.Item
-                label="款号"
+                label={styleFieldLabel("款号", "style_no", true)}
                 name="style_no"
                 rules={[{ required: designMode !== "COLLECTION_2SKU", message: "请选择款号" }]}
-                help="款图正面图 + 色号文件夹会自动联动"
+                help="款图双视角图 + 色号文件夹会自动联动"
               >
                 <Select placeholder="选款号..." options={styleOptions} />
               </Form.Item>
@@ -769,7 +805,7 @@ export default function InputsPanel() {
           ) : (
             <>
               <Form.Item
-                label="上装款号"
+                label={styleFieldLabel("上装款号", "top_style_no", true)}
                 name="top_style_no"
                 rules={[{ required: true, message: "请选择上装款号" }]}
               >
@@ -780,7 +816,7 @@ export default function InputsPanel() {
               <StylePreview formInstance={form} fieldName="top_style_no" label="👕 上装款图" />
 
               <Form.Item
-                label="下装款号"
+                label={styleFieldLabel("下装款号", "bottom_style_no")}
                 name="bottom_style_no"
                 rules={[
                   { required: true, message: "请选择下装款号" },
@@ -1217,6 +1253,29 @@ export default function InputsPanel() {
         }}
         initialFolder={patternLibraryPath}
         initialFiles={patternLibrarySelectedFiles}
+      />
+
+      {/* 款图库：新款入库 / 追加色号 */}
+      <StyleUploadModal
+        open={styleUploadOpen}
+        presetStyleNo={styleAppendPreset}
+        onClose={() => { setStyleUploadOpen(false); setStyleAppendPreset(undefined); }}
+        onDone={(newNo) => {
+          // 从哪个选择器点开就回填哪个字段（追加色号模式不回填，避免覆盖用户当前选择）
+          if (!styleAppendPreset) {
+            form.setFieldsValue({ [styleUploadTargetRef.current]: newNo });
+          }
+        }}
+      />
+
+      {/* 款图库：库管理（搜索/品类/补背面/双视角图） */}
+      <StyleLibraryModal
+        open={styleLibraryOpen}
+        onClose={() => setStyleLibraryOpen(false)}
+        onAppend={(no) => {
+          setStyleAppendPreset(no);
+          setStyleUploadOpen(true);
+        }}
       />
     </Space>
   );

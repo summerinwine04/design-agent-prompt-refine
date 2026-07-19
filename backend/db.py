@@ -180,6 +180,17 @@ CREATE TABLE IF NOT EXISTS selected_styles (
     created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 款图库元数据：文件夹（ai-supply/款图）是图片事实来源，这里只存品类/时间
+-- （见 docs/款图库管理_产品方案PRD.md v1.3）
+CREATE TABLE IF NOT EXISTS style_meta (
+    style_no       TEXT PRIMARY KEY,
+    category_main  TEXT NOT NULL,      -- 童装/男装/女装/运动/男睡衣/女睡衣
+    category_sub   TEXT NOT NULL,      -- top | bottom | onepiece
+    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    source         TEXT NOT NULL DEFAULT 'upload',   -- upload | backfill
+    file_mtime     TEXT                -- backfill 时的文件修改时间，仅参考
+);
+
 -- 波段上新管理：波段（Wave）= 上新排期容器；look 至多属于一个波段
 CREATE TABLE IF NOT EXISTS waves (
     id                   TEXT PRIMARY KEY,  -- wv-{timestamp}-{hex6}
@@ -946,5 +957,62 @@ def upsert_image_categories_bulk(items: list[dict]) -> int:
             n += 1
         conn.commit()
         return n
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# 款图库元数据（style_meta）—— 文件夹是图片事实来源，这里只存品类/时间
+# ============================================================================
+
+def list_style_meta() -> dict[str, dict]:
+    """返回 style_no → meta 行的映射，GET /styles 列表 JOIN 用。"""
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM style_meta").fetchall()
+        return {r["style_no"]: dict(r) for r in rows}
+    finally:
+        conn.close()
+
+
+def get_style_meta(style_no: str) -> dict | None:
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM style_meta WHERE style_no = ?", (style_no,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def upsert_style_meta(
+    *,
+    style_no: str,
+    category_main: str,
+    category_sub: str,
+    source: str = "upload",
+    file_mtime: str | None = None,
+) -> None:
+    conn = get_conn()
+    try:
+        conn.execute(
+            """INSERT INTO style_meta (style_no, category_main, category_sub, source, file_mtime)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(style_no) DO UPDATE SET
+                 category_main = excluded.category_main,
+                 category_sub = excluded.category_sub""",
+            (style_no, category_main, category_sub, source, file_mtime),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_style_meta(style_no: str) -> None:
+    conn = get_conn()
+    try:
+        conn.execute("DELETE FROM style_meta WHERE style_no = ?", (style_no,))
+        conn.commit()
     finally:
         conn.close()

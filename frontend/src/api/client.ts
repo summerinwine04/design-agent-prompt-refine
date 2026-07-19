@@ -385,6 +385,85 @@ export const listStyles = () => api.get("/styles").then((r) => r.data);
 export const getStyle = (styleNo: string) =>
   api.get(`/styles/${encodeURIComponent(styleNo)}`).then((r) => r.data);
 
+// ----- 款图库管理（docs/款图库管理_产品方案PRD.md v1.3）----- //
+
+export interface StyleColor {
+  filename: string;
+  code: string;
+  name: string;
+  path: string;
+  url: string;
+  back_filename: string | null;
+  back_url: string | null;
+}
+
+export interface StyleListItem {
+  style_no: string;
+  ref_image: string | null;
+  ref_image_url: string | null;
+  color_folder: string | null;
+  color_count: number;
+  cover_color_url: string | null;
+  missing_back_count: number;
+  category_main: string | null;
+  category_sub: string | null;
+  created_at: string | null;
+  meta_missing: boolean;
+}
+
+export const STYLE_CATEGORY_MAIN = ["童装", "男装", "女装", "运动", "男睡衣", "女睡衣"] as const;
+export const STYLE_CATEGORY_SUB = [
+  { value: "top", label: "上装" },
+  { value: "bottom", label: "下装" },
+  { value: "onepiece", label: "整套装" },
+] as const;
+
+// 新款入库 / 追加色号：skus 与 fronts/backs 按下标对应，正反面必填
+export const uploadStyle = (payload: {
+  style_no?: string;
+  category_main: string;
+  category_sub: string;
+  skus: Array<{ code?: string; name: string; front: File; back: File }>;
+}) => {
+  const form = new FormData();
+  form.append("style_no", payload.style_no || "");
+  form.append("category_main", payload.category_main);
+  form.append("category_sub", payload.category_sub);
+  form.append(
+    "sku_meta",
+    JSON.stringify(payload.skus.map((s) => ({ code: s.code || "", name: s.name }))),
+  );
+  payload.skus.forEach((s) => {
+    form.append("fronts", s.front);
+    form.append("backs", s.back);
+  });
+  return api.post("/styles/upload", form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  }).then((r) => r.data);
+};
+
+export const patchStyleMeta = (styleNo: string, payload: { category_main: string; category_sub: string }) =>
+  api.patch(`/styles/${encodeURIComponent(styleNo)}/meta`, payload).then((r) => r.data);
+
+// 更换款级双视角图：给 colorCode = 用该色号正反面重拼；给 file = 直传现成双视角图
+export const updateStyleCover = (styleNo: string, opts: { colorCode?: string; file?: File }) => {
+  const form = new FormData();
+  if (opts.colorCode) form.append("color_code", opts.colorCode);
+  if (opts.file) form.append("file", opts.file);
+  return api.post(`/styles/${encodeURIComponent(styleNo)}/cover`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  }).then((r) => r.data);
+};
+
+export const uploadStyleBack = (styleNo: string, colorCode: string, file: File) => {
+  const form = new FormData();
+  form.append("color_code", colorCode);
+  form.append("file", file);
+  return api.post(`/styles/${encodeURIComponent(styleNo)}/back`, form, {
+    headers: { "Content-Type": "multipart/form-data" },
+  }).then((r) => r.data);
+};
+
 // 上传 PDF + 名字 → 启动趋势导入 job
 export const uploadTrend = (name: string, pdf: File) => {
   const form = new FormData();
