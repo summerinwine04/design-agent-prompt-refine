@@ -23,7 +23,7 @@ const { Header, Content } = Layout;
 const NAV_ITEMS = [
   { key: "/", label: <Link to="/">工作台</Link> },
   { key: "/compare", label: <Link to="/compare">对比 Runs</Link> },
-  { key: "/tasks", label: <Link to="/tasks">生图任务</Link> },
+  { key: "/tasks", label: <Link to="/tasks">设计生图任务</Link> },
   { key: "/selection", label: <Link to="/selection">🛒 选款中心</Link> },
   { key: "/fitting-room", label: <Link to="/fitting-room">👗 Fitting Room</Link> },
   { key: "/prompts", label: <Link to="/prompts">Prompt 版本</Link> },
@@ -50,7 +50,10 @@ export default function App() {
 
   return (
     <Layout style={{ minHeight: "100vh" }}>
-      <Header style={{ display: "flex", alignItems: "center", background: "#fff", borderBottom: "1px solid #eee" }}>
+      <Header style={{
+        display: "flex", alignItems: "center", background: "#fff", borderBottom: "1px solid #eee",
+        position: "sticky", top: 0, zIndex: 200,   // 滚动时导航钉在顶部
+      }}>
         <div style={{ fontWeight: 600, marginRight: 32 }}>prompt-refine-agent</div>
         <Menu
           mode="horizontal"

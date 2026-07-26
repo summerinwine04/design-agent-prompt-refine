@@ -54,11 +54,13 @@ export default function SelectionCenterPage() {
   const [originFilter, setOriginFilter] = useState<string>("all");
   const [kw, setKw] = useState("");
 
-  // 组套模式（?compose=1 直接进入）
+  // 组套模式（?compose=1 直接进入）。
+  // 点击顺序语义：
+  //   上→下 = 一套完整 look；上→上 = 前一个封成「缺下装」look；
+  //   下（无待配上装）= 自成「缺上装」look；下→下 = 两套「缺上装」look
   const [composeMode, setComposeMode] = useState(searchParams.get("compose") === "1");
   const [pendingTop, setPendingTop] = useState<SelectionStyle | null>(null);
-  const [pendingBottom, setPendingBottom] = useState<SelectionStyle | null>(null);
-  const [pairs, setPairs] = useState<Array<{ top: SelectionStyle; bottom: SelectionStyle }>>([]);
+  const [pairs, setPairs] = useState<Array<{ top?: SelectionStyle | null; bottom?: SelectionStyle | null }>>([]);
 
   const [uploadOpen, setUploadOpen] = useState(false);
   // 「设计灵感」详情弹窗：点击卡片打开（非组套模式）
@@ -127,37 +129,56 @@ export default function SelectionCenterPage() {
   });
 
   const composeSubmitMut = useMutation({
-    mutationFn: (ps: Array<{ top: SelectionStyle; bottom: SelectionStyle }>) =>
+    mutationFn: (ps: Array<{ top?: SelectionStyle | null; bottom?: SelectionStyle | null }>) =>
       createLooksBulk(ps.map((p) => ({
-        top_kind: "image" as const,
-        top_image_id: p.top.image_id,
-        bottom_kind: "image" as const,
-        bottom_image_id: p.bottom.image_id,
+        top_kind: p.top ? ("image" as const) : null,
+        top_image_id: p.top?.image_id || null,
+        bottom_kind: p.bottom ? ("image" as const) : null,
+        bottom_image_id: p.bottom?.image_id || null,
       }))),
     onSuccess: (created) => {
-      message.success(`已创建 ${created.length} 套 look，进入 Fitting Room 未分波段池`);
-      setPairs([]); setPendingTop(null); setPendingBottom(null); setComposeMode(false);
+      message.success(`已创建 ${created.length} 套 look，进入 Fitting Room 未分波段池（缺侧的可在看板补文本）`);
+      setPairs([]); setPendingTop(null); setComposeMode(false);
       queryClient.invalidateQueries({ queryKey: ["looks"] });
       queryClient.invalidateQueries({ queryKey: ["waves"] });
     },
     onError: (e: any) => message.error("创建失败：" + (e?.response?.data?.detail || e?.message)),
   });
 
-  // 组套点选：按类目落到对应槽位；上下都有 → 成一对入列表
+  // 组套点选（顺序语义，见上方注释）
   const handleComposePick = (it: SelectionStyle) => {
     if (!it.category) {
       message.warning("该款未标类目（上装/下装），无法参与组套");
       return;
     }
-    const nextTop = it.category === "top" ? it : pendingTop;
-    const nextBottom = it.category === "bottom" ? it : pendingBottom;
-    if (nextTop && nextBottom) {
-      setPairs((prev) => [...prev, { top: nextTop, bottom: nextBottom }]);
-      setPendingTop(null); setPendingBottom(null);
+    if (it.category === "bottom") {
+      if (pendingTop) {
+        // 上→下：配成一套完整 look
+        setPairs((prev) => [...prev, { top: pendingTop, bottom: it }]);
+        setPendingTop(null);
+      } else {
+        // 无待配上装：下装自成一套「缺上装」look
+        setPairs((prev) => [...prev, { bottom: it }]);
+      }
     } else {
-      setPendingTop(nextTop); setPendingBottom(nextBottom);
+      if (pendingTop && pendingTop.id === it.id) {
+        // 再点一次待配中的上装 = 取消待配
+        setPendingTop(null);
+        return;
+      }
+      if (pendingTop) {
+        // 上→上：前一个封成「缺下装」look，新上装继续等下装
+        setPairs((prev) => [...prev, { top: pendingTop }]);
+      }
+      setPendingTop(it);
     }
   };
+
+  // 确认时把还在等下装的上装也封成「缺下装」look
+  const finalLooks = useMemo(
+    () => [...pairs, ...(pendingTop ? [{ top: pendingTop }] : [])],
+    [pairs, pendingTop],
+  );
 
   const imgUrlOf = (it: SelectionStyle): string | null => {
     if (it.source_kind === "uploaded") return it.upload_url;
@@ -182,29 +203,23 @@ export default function SelectionCenterPage() {
           {composeMode ? (
             <>
               <span style={{ fontSize: 13, color: "#1677ff" }}>
-                👗 组套：{pendingTop ? `已选上装 ${pendingTop.style_no || ""}` : "点一个上装"}
-                {" + "}
-                {pendingBottom ? `已选下装 ${pendingBottom.style_no || ""}` : "点一个下装"}
-                ，已配 <strong>{pairs.length}</strong> 套
+                👗 组套：
+                {pendingTop
+                  ? `上装 ${pendingTop.style_no || ""} 待配（点下装成套 / 再点它取消 / 点其他上装则它封为缺下装）`
+                  : "点上装开始配对；直接点下装 = 单下装 look"}
+                ，已配 <strong>{finalLooks.length}</strong> 套
               </span>
               <Button
                 size="small"
-                disabled={!pendingTop && !pendingBottom}
-                onClick={() => { setPendingTop(null); setPendingBottom(null); }}
-              >
-                清当前
-              </Button>
-              <Button
-                size="small"
                 type="primary"
-                disabled={pairs.length === 0}
+                disabled={finalLooks.length === 0}
                 loading={composeSubmitMut.isPending}
-                onClick={() => composeSubmitMut.mutate(pairs)}
+                onClick={() => composeSubmitMut.mutate(finalLooks)}
               >
-                ✅ 创建 {pairs.length} 套 look
+                ✅ 创建 {finalLooks.length} 套 look
               </Button>
               <Button size="small" onClick={() => {
-                setComposeMode(false); setPairs([]); setPendingTop(null); setPendingBottom(null);
+                setComposeMode(false); setPairs([]); setPendingTop(null);
               }}>
                 退出组套
               </Button>
@@ -254,7 +269,7 @@ export default function SelectionCenterPage() {
         </Space>
       </Space>
 
-      {/* 组套模式的已配对列表 */}
+      {/* 组套模式的已配对列表（缺侧的橙色提示） */}
       {composeMode && pairs.length > 0 && (
         <Space wrap style={{ marginBottom: 12 }}>
           {pairs.map((p, i) => (
@@ -262,11 +277,16 @@ export default function SelectionCenterPage() {
               key={i}
               closable
               onClose={() => setPairs((prev) => prev.filter((_, j) => j !== i))}
-              color="blue"
+              color={p.top && p.bottom ? "blue" : "orange"}
             >
-              #{i + 1} {p.top.style_no || "上装"}·{p.top.color_name || p.top.color_code || ""}
+              #{i + 1}{" "}
+              {p.top
+                ? `${p.top.style_no || "上装"}·${p.top.color_name || p.top.color_code || ""}`
+                : "缺上装"}
               {" × "}
-              {p.bottom.style_no || "下装"}·{p.bottom.color_name || p.bottom.color_code || ""}
+              {p.bottom
+                ? `${p.bottom.style_no || "下装"}·${p.bottom.color_name || p.bottom.color_code || ""}`
+                : "缺下装"}
             </Tag>
           ))}
         </Space>
@@ -291,10 +311,9 @@ export default function SelectionCenterPage() {
         >
           {paged.map((it) => {
             const url = imgUrlOf(it);
-            const isPendingPick =
-              (pendingTop && pendingTop.id === it.id) || (pendingBottom && pendingBottom.id === it.id);
+            const isPendingPick = !!pendingTop && pendingTop.id === it.id;
             const pairedCount = pairs.filter(
-              (p) => p.top.id === it.id || p.bottom.id === it.id,
+              (p) => p.top?.id === it.id || p.bottom?.id === it.id,
             ).length;
             return (
               <div

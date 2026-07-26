@@ -267,8 +267,12 @@ export default function FittingRoomPage() {
 
   return (
     <div style={{ padding: 24 }}>
-      {/* 顶部工具条 */}
-      <Space style={{ marginBottom: 16, width: "100%", justifyContent: "space-between" }}>
+      {/* 顶部工具条：滚动时钉在导航栏下方（导航高 64px） */}
+      <Space style={{
+        marginBottom: 8, width: "100%", justifyContent: "space-between",
+        position: "sticky", top: 64, zIndex: 150,
+        background: "#f6f7f9", padding: "10px 0",
+      }}>
         <Space wrap>
           <h2 style={{ margin: 0 }}>👗 Fitting Room</h2>
           <span style={{ fontSize: 13, color: "#999" }}>
